@@ -42,6 +42,24 @@ The worker plane prioritizes throughput, low latency, and resource efficiency. I
 - **Redis**: Caching layer and optional broker backend
 - **Workers**: Go processes that consume from broker and execute tasks
 
+## FIFO Scheduling Policy
+
+FIFO means **First-In, First-Out**: the first job that enters the queue is the first job that should be chosen to run. If jobs arrive in the order A, B, C, then a FIFO scheduler will pick A first, then B, then C.
+
+FIFO is the simplest scheduling baseline because it is:
+
+- **Easy to reason about**: order is predictable and matches arrival order
+- **Easy to implement**: minimal logic beyond a queue
+- **A good reference point**: it gives a clear “default” behavior to compare against more advanced policies
+
+In KernelQ, FIFO fits as **Python control plane scheduler logic**: the control plane decides which queued job should be dispatched next, and FIFO is the most straightforward way to produce that ordering.
+
+FIFO has important limitations:
+
+- **No notion of priority**: it cannot intentionally run more important jobs first
+- **No fairness across tenants**: a busy tenant can dominate the queue and crowd out others
+- **Can delay urgent work behind older jobs**: urgent jobs may wait a long time if earlier jobs are already ahead in line
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane
