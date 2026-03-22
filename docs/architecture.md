@@ -4,7 +4,7 @@
 
 This system is a distributed work coordination and scheduling platform. It behaves like an operating system for backend jobs. The system is split into two planes: a control plane that makes decisions and a worker plane that executes tasks.
 
-The control plane handles scheduling, state management, and coordination. The worker plane handles high-throughput task execution. They communicate through a message broker.
+The control plane handles scheduling, state management, and coordination. The worker plane handles high-throughput task execution. They communicate through **Kafka**.
 
 ## Control Plane (Python)
 
@@ -24,7 +24,7 @@ The control plane prioritizes flexibility and rapid development over raw perform
 The worker plane is responsible for:
 
 - **Task execution**: Running the actual job code when it's time
-- **Broker consumption**: Pulling jobs from the message broker efficiently
+- **Broker consumption**: Pulling jobs from Kafka efficiently
 - **Concurrency management**: Handling thousands of concurrent task executions
 - **Resource isolation**: Enforcing limits per job, tenant, or resource type
 - **Execution metrics**: Reporting task completion, latency, and errors back to the control plane
@@ -37,10 +37,10 @@ The worker plane prioritizes throughput, low latency, and resource efficiency. I
 - **API Gateway**: Entry point for external requests (REST API)
 - **Scheduler**: Decides when jobs should run (part of control plane)
 - **Job State Machine**: Manages job lifecycle transitions (pending → queued → running → completed/failed)
-- **Message Broker**: Queue system for distributing jobs to workers (e.g., RabbitMQ, Redis Streams, or Kafka)
+- **Kafka**: Durable messaging backbone used to transport runnable jobs from the Python control plane to Go workers, support consumer-group-based scaling, and enable retry / replay workflows.
 - **Postgres**: Persistent storage for job definitions, schedules, and state
-- **Redis**: Caching layer and optional broker backend
-- **Workers**: Go processes that consume from broker and execute tasks
+- **Redis**: Caching layer
+- **Workers**: Go processes that consume from Kafka and execute tasks
 
 ## FIFO Scheduling Policy
 
@@ -64,8 +64,8 @@ FIFO has important limitations:
 
 1. **Enqueue**: Client sends job request via REST API to control plane
 2. **Persist**: Control plane saves job definition and schedule to Postgres
-3. **Enqueue to broker**: When job is ready to run, control plane publishes to message broker
-4. **Workers consume**: Go workers pull jobs from broker
+3. **Enqueue to Kafka**: When job is ready to run, control plane publishes to Kafka
+4. **Workers consume**: Go workers pull jobs from Kafka
 5. **Report back**: Workers update job state in Postgres and send metrics to control plane
 6. **Completion**: Control plane updates final state and triggers any dependent jobs
 
@@ -85,7 +85,7 @@ KernelQ defines the following job states:
 
 - **QUEUED**: Job is scheduled and waiting in the queue to be picked up by a worker. The scheduler has determined it's time to run, but no worker has claimed it yet.
 
-- **DISPATCHED**: Job has been sent to the message broker and is available for workers to consume. A worker may pick it up soon.
+- **DISPATCHED**: Job has been sent to Kafka and is available for workers to consume. A worker may pick it up soon.
 
 - **RUNNING**: A worker has claimed the job and is currently executing it. The job code is actively running.
 
@@ -126,22 +126,20 @@ DISPATCHED → QUEUED (if dispatch fails or times out)
 
 RUNNING → SUCCEEDED
 RUNNING → FAILED
-RUNNING → RETRY_SCHEDULED
 RUNNING → CANCELED
-
-RETRY_SCHEDULED → QUEUED (when retry time arrives)
-RETRY_SCHEDULED → DEAD_LETTERED (if max retries exceeded)
-RETRY_SCHEDULED → CANCELED
 
 FAILED → RETRY_SCHEDULED (if retries remaining)
 FAILED → DEAD_LETTERED (if no retries remaining)
+
+RETRY_SCHEDULED → QUEUED (when retry time arrives)
+RETRY_SCHEDULED → CANCELED
 ```
 
 ### Invalid Transitions
 
 These transitions are not allowed and will be rejected:
 
-- Any transition from a terminal state (SUCCEEDED, FAILED, DEAD_LETTERED, CANCELED)
+- Any transition from a terminal state (SUCCEEDED, DEAD_LETTERED, CANCELED) is invalid.
 - CREATED → RUNNING (must go through QUEUED and DISPATCHED first)
 - QUEUED → SUCCEEDED (must be executed first)
 - SUCCEEDED → any other state
@@ -150,14 +148,16 @@ These transitions are not allowed and will be rejected:
 
 ### Where Retries Fit
 
-When a job in the RUNNING state fails, the system checks if retries are configured and available:
+When a job in the **RUNNING** state fails, it first transitions to **FAILED**. That keeps failure explicit and easier to measure.
 
-1. If retries remain: Transition to RETRY_SCHEDULED
-2. If no retries remain: Transition to FAILED, then to DEAD_LETTERED
+From **FAILED**, the system checks if retries are configured and available:
 
-When a job is in RETRY_SCHEDULED, it waits for the retry delay (with exponential backoff and jitter). Once the delay expires, it transitions back to QUEUED, then follows the normal flow: QUEUED → DISPATCHED → RUNNING.
+1. If retries remain: **FAILED → RETRY_SCHEDULED**
+2. If no retries remain: **FAILED → DEAD_LETTERED**
 
-This creates a retry loop: RUNNING → RETRY_SCHEDULED → QUEUED → DISPATCHED → RUNNING (repeat until success or max retries).
+When a job is in **RETRY_SCHEDULED**, it waits for the retry delay (with exponential backoff and jitter). Once the delay expires, it transitions back to **QUEUED**, then follows the normal flow: QUEUED → DISPATCHED → RUNNING.
+
+This creates a retry loop: **RUNNING → FAILED → RETRY_SCHEDULED → QUEUED → DISPATCHED → RUNNING** (repeat until success or max retries).
 
 ### Where Cancellation Fits
 
@@ -174,42 +174,47 @@ Once canceled, the job transitions to CANCELED (terminal state). Workers must ch
 ### State Machine Diagram
 
 ```
-                    ┌─────────┐
-                    │ CREATED │
-                    └────┬────┘
-                         │
-            ┌────────────┼────────────┐
-            │            │            │
-            ▼            ▼            ▼
-      ┌─────────┐  ┌──────────┐  ┌──────────┐
-      │ QUEUED  │  │CANCELED  │  │ QUEUED   │
-      └────┬────┘  └──────────┘  └────┬────┘
-           │                          │
-           ▼                          │
-    ┌─────────────┐                  │
-    │ DISPATCHED  │◄─────────────────┘
-    └──────┬──────┘
-           │
-           ▼
-     ┌──────────┐
-     │ RUNNING  │
-     └────┬─────┘
-          │
-     ┌────┼────┬──────────────┐
-     │    │    │              │
-     ▼    ▼    ▼              ▼
-┌────────┐ ┌──────────┐ ┌──────────────┐ ┌──────────┐
-│SUCCEEDED│ │  FAILED │ │RETRY_SCHEDULED│ │CANCELED  │
-└────────┘ └────┬─────┘ └──────┬───────┘ └──────────┘
-                │              │
-                │              │
-                ▼              ▼
-         ┌──────────────┐ ┌──────────┐
-         │DEAD_LETTERED │ │  QUEUED  │
-         └──────────────┘ └──────────┘
+                 ┌─────────┐
+                 │ CREATED │
+                 └────┬────┘
+                      │
+                      ▼
+                 ┌────────┐
+                 │ QUEUED │
+                 └───┬─┬──┘
+                     │ │
+                     │ └──────────────► ┌──────────┐
+                     │                  │ CANCELED │
+                     │                  └──────────┘
+                     ▼
+              ┌────────────┐
+              │ DISPATCHED │
+              └─────┬──────┘
+                    │
+                    ▼
+               ┌─────────┐
+               │ RUNNING │
+               └─┬───┬───┘
+                 │   │
+      ┌──────────┘   └───────────────┐
+      ▼                              ▼
+┌───────────┐                  ┌──────────┐
+│ SUCCEEDED │                  │  FAILED  │
+└───────────┘                  └────┬─────┘
+                                    │
+                     ┌──────────────┴──────────────┐
+                     ▼                             ▼
+            ┌─────────────────┐           ┌───────────────┐
+            │ RETRY_SCHEDULED │           │ DEAD_LETTERED │
+            └────────┬────────┘           └───────────────┘
+                     │
+                     ▼
+                 ┌────────┐
+                 │ QUEUED │
+                 └────────┘
 ```
 
 Legend:
-- Solid arrows: Normal transitions
-- Dashed arrows: Retry loop
-- Terminal states: SUCCEEDED, FAILED, DEAD_LETTERED, CANCELED
+
+- Solid arrows: normal transitions
+- Terminal states: **SUCCEEDED**, **DEAD_LETTERED**, **CANCELED**

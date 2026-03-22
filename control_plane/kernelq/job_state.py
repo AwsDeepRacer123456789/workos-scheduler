@@ -41,7 +41,7 @@ ALLOWED_TRANSITIONS = {
         JobState.CANCELED,    # Job canceled before scheduling
     },
     JobState.QUEUED: {
-        JobState.DISPATCHED,  # Job sent to message broker
+        JobState.DISPATCHED,  # Job sent to Kafka for worker pickup
         JobState.CANCELED,    # Job canceled while waiting in queue
     },
     JobState.DISPATCHED: {
@@ -49,15 +49,13 @@ ALLOWED_TRANSITIONS = {
         JobState.QUEUED,      # Dispatch failed or timed out, retry queuing
     },
     JobState.RUNNING: {
-        JobState.SUCCEEDED,       # Job completed successfully
-        JobState.FAILED,          # Job failed (may retry if retries remain)
-        JobState.RETRY_SCHEDULED, # Job failed but will be retried
-        JobState.CANCELED,        # Job canceled during execution
+        JobState.SUCCEEDED,  # Job completed successfully
+        JobState.FAILED,     # Job failed; next step is RETRY_SCHEDULED or DEAD_LETTERED
+        JobState.CANCELED,   # Job canceled during execution
     },
     JobState.RETRY_SCHEDULED: {
-        JobState.QUEUED,          # Retry time arrived, re-queue the job
-        JobState.DEAD_LETTERED,   # Max retries exceeded, move to DLQ
-        JobState.CANCELED,        # Job canceled before retry executes
+        JobState.QUEUED,     # Retry time arrived, re-queue the job
+        JobState.CANCELED,   # Job canceled before retry executes
     },
     JobState.FAILED: {
         JobState.RETRY_SCHEDULED, # Retries remaining, schedule a retry
@@ -141,16 +139,14 @@ def explain_transition(from_state: JobState, to_state: JobState) -> str:
     transition_explanations = {
         (JobState.CREATED, JobState.QUEUED): "Job scheduled and moved to queue",
         (JobState.CREATED, JobState.CANCELED): "Job canceled before scheduling",
-        (JobState.QUEUED, JobState.DISPATCHED): "Job sent to message broker for worker pickup",
+        (JobState.QUEUED, JobState.DISPATCHED): "Job sent to Kafka for worker pickup",
         (JobState.QUEUED, JobState.CANCELED): "Job canceled while waiting in queue",
         (JobState.DISPATCHED, JobState.RUNNING): "Worker picked up job and started execution",
         (JobState.DISPATCHED, JobState.QUEUED): "Dispatch failed or timed out, re-queuing job",
         (JobState.RUNNING, JobState.SUCCEEDED): "Job completed successfully",
         (JobState.RUNNING, JobState.FAILED): "Job failed during execution",
-        (JobState.RUNNING, JobState.RETRY_SCHEDULED): "Job failed, scheduling retry attempt",
         (JobState.RUNNING, JobState.CANCELED): "Job canceled during execution",
         (JobState.RETRY_SCHEDULED, JobState.QUEUED): "Retry time arrived, re-queuing job for retry",
-        (JobState.RETRY_SCHEDULED, JobState.DEAD_LETTERED): "Max retries exceeded, moving to dead letter queue",
         (JobState.RETRY_SCHEDULED, JobState.CANCELED): "Job canceled before retry executes",
         (JobState.FAILED, JobState.RETRY_SCHEDULED): "Retries remaining, scheduling retry attempt",
         (JobState.FAILED, JobState.DEAD_LETTERED): "No retries remaining, moving to dead letter queue",
