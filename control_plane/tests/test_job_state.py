@@ -24,7 +24,7 @@ class TestValidTransitions:
         assert "moved to queue" in explanation
 
     def test_queued_to_dispatched(self):
-        """QUEUED → DISPATCHED: Job sent to message broker."""
+        """QUEUED → DISPATCHED: Job sent to Kafka."""
         assert can_transition(JobState.QUEUED, JobState.DISPATCHED) is True
         explanation = explain_transition(JobState.QUEUED, JobState.DISPATCHED)
         assert "Valid transition" in explanation
@@ -163,13 +163,13 @@ class TestAdditionalValidTransitions:
         """DISPATCHED → QUEUED: Valid retry when dispatch fails."""
         assert can_transition(JobState.DISPATCHED, JobState.QUEUED) is True
 
-    def test_running_to_retry_scheduled(self):
-        """RUNNING → RETRY_SCHEDULED: Valid retry scheduling."""
-        assert can_transition(JobState.RUNNING, JobState.RETRY_SCHEDULED) is True
+    def test_running_to_retry_scheduled_not_direct(self):
+        """RUNNING → RETRY_SCHEDULED: Invalid; failures go RUNNING → FAILED first."""
+        assert can_transition(JobState.RUNNING, JobState.RETRY_SCHEDULED) is False
 
-    def test_retry_scheduled_to_dead_lettered(self):
-        """RETRY_SCHEDULED → DEAD_LETTERED: Valid when max retries exceeded."""
-        assert can_transition(JobState.RETRY_SCHEDULED, JobState.DEAD_LETTERED) is True
+    def test_retry_scheduled_to_dead_lettered_not_allowed(self):
+        """RETRY_SCHEDULED → DEAD_LETTERED: Invalid; exhaustion is FAILED → DEAD_LETTERED."""
+        assert can_transition(JobState.RETRY_SCHEDULED, JobState.DEAD_LETTERED) is False
 
     def test_retry_scheduled_to_canceled(self):
         """RETRY_SCHEDULED → CANCELED: Valid cancellation before retry."""
