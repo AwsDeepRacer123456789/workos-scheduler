@@ -26,11 +26,14 @@ The control plane is responsible for:
 
 Think of it like a manager: it makes plans, coordinates work, and handles problems. The workers (in Go) do the actual execution.
 
-## Current Scheduling Logic
+## Current Scheduling Policies
 
-Right now, KernelQ includes a simple **FIFO (First-In, First-Out) scheduler** implemented in Python. FIFO is our **baseline scheduling policy**: jobs are returned in the same order they were enqueued.
+KernelQ’s control plane now includes **two** in-Python schedulers:
 
-More advanced policies (like **priority scheduling** and **fair scheduling across tenants**) will be added later as the system grows.
+- **FIFO (First-In, First-Out)** — our **baseline**: jobs leave the queue in the same order they arrived. Simple and easy to compare against.
+- **Priority scheduling** — jobs with **higher priority** are chosen first, so more urgent work can jump ahead of older, less important jobs.
+
+**Fair scheduling** (e.g. across tenants) and **starvation prevention** are not implemented yet; we’ll add those later as the platform matures.
 
 ## What job_state.py Models
 

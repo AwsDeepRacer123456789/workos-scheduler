@@ -60,6 +60,16 @@ FIFO has important limitations:
 - **No fairness across tenants**: a busy tenant can dominate the queue and crowd out others
 - **Can delay urgent work behind older jobs**: urgent jobs may wait a long time if earlier jobs are already ahead in line
 
+## Priority Scheduling Policy
+
+**Priority scheduling** means the scheduler chooses what to run next based on **importance or urgency**, not only on **arrival order**. Each job carries a priority (for example high / normal / low, or a numeric rank). When picking the next runnable job, the scheduler prefers **higher-priority** work over lower-priority work.
+
+**How it differs from FIFO:** **FIFO** only asks “who got here first?” **Priority scheduling** also asks “who matters most?” So a **newer** high-priority job can be ordered **ahead of** an **older** low-priority job—something pure FIFO will never do.
+
+**Where it fits in KernelQ:** Priority rules live in the **Python control plane scheduler logic**: the control plane decides **which queued job to dispatch next** (and in what order). Workers in Go **execute**; they do not own the policy that decides global priority among waiting jobs.
+
+**A major limitation:** naive priority scheduling can cause **starvation**—low-priority jobs may wait a very long time (or never run) if higher-priority work keeps arriving. Real systems often add **fairness** mechanisms (e.g., aging, caps, or tenant quotas) so low-priority work still makes progress.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane
