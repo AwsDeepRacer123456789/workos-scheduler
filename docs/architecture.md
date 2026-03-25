@@ -70,6 +70,26 @@ FIFO has important limitations:
 
 **A major limitation:** naive priority scheduling can cause **starvation**—low-priority jobs may wait a very long time (or never run) if higher-priority work keeps arriving. Real systems often add **fairness** mechanisms (e.g., aging, caps, or tenant quotas) so low-priority work still makes progress.
 
+## Starvation and Fairness
+
+**Starvation** (in scheduling) means some work waits **far too long** or **never gets a turn**, even though the system is still busy processing other jobs. The starved jobs are stuck behind a policy or load pattern that never favors them.
+
+**Why naive priority can starve low-priority jobs:** if the scheduler *always* prefers higher priority, and higher-priority jobs **keep arriving**, lower-priority jobs may **never reach the front of the line**. There is no rule that guarantees them *any* progress—only that *more important* work goes first.
+
+**Fairness** means the scheduler tries to give **each tenant or queue a fair share of progress** over time—not letting one customer or job class **monopolize** the system forever, even when priorities exist. Fairness is often implemented with **limits**, **quotas**, **aging** (boosting jobs that wait too long), or **round-robin** style turns across tenants.
+
+In KernelQ, starvation and fairness concerns inform **how we design** the Python control plane scheduler: not just *who is most important*, but *who still gets to run* when the system is overloaded.
+
+## Weighted Round Robin Scheduling Policy
+
+**Weighted round robin (WRR)** is a way to serve **multiple queues** (often one per **tenant** or **job class**) in **rotating turns**. Each queue gets repeated chances to dispatch a job. **Weights** set how strong each queue’s share is—for example, a weight of `2` might mean “roughly twice as many turns” as a weight of `1` in each full cycle.
+
+**How WRR helps compared to naive priority:** naive priority can **starve** whole categories of work. WRR adds **structure**: even busy tenants take turns according to their weight, so quieter tenants are not **permanently crowded out** by a flood of high-priority work elsewhere.
+
+**A limitation:** WRR is often **fairer across tenants**, but it **does not by itself solve every latency or priority problem**. You can still have urgent jobs delayed if the policy does not combine WRR with **priority**, **SLO-aware rules**, or **per-tenant caps**. Choosing weights can also be subtle: “fair” sharing is not the same as “optimal” for every workload.
+
+**Where it fits in KernelQ:** weighted round robin is **Python control plane scheduler logic**—the layer that decides **which tenant’s queue** (or which class of job) gets the next dispatch opportunity. Go workers **run** jobs; they do not decide global rotation and weights across tenants.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane

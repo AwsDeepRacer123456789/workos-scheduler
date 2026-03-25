@@ -28,12 +28,11 @@ Think of it like a manager: it makes plans, coordinates work, and handles proble
 
 ## Current Scheduling Policies
 
-KernelQ’s control plane now includes **two** in-Python schedulers:
+KernelQ’s control plane includes **three** in-Python schedulers:
 
-- **FIFO (First-In, First-Out)** — our **baseline**: jobs leave the queue in the same order they arrived. Simple and easy to compare against.
-- **Priority scheduling** — jobs with **higher priority** are chosen first, so more urgent work can jump ahead of older, less important jobs.
-
-**Fair scheduling** (e.g. across tenants) and **starvation prevention** are not implemented yet; we’ll add those later as the platform matures.
+- **FIFO (First-In, First-Out)** — our **baseline**: jobs leave the queue in arrival order. Simple and easy to compare against.
+- **Priority scheduling** — jobs with **higher priority** run sooner, so urgent work can jump ahead of less important work.
+- **Weighted round robin** — rotates dispatch turns across **tenants** using weights, improving **fairness** between customers and reducing **starvation** risk when the system is busy.
 
 ## What job_state.py Models
 
