@@ -34,6 +34,14 @@ KernelQ’s control plane includes **three** in-Python schedulers:
 - **Priority scheduling** — jobs with **higher priority** run sooner, so urgent work can jump ahead of less important work.
 - **Weighted round robin** — rotates dispatch turns across **tenants** using weights, improving **fairness** between customers and reducing **starvation** risk when the system is busy.
 
+## Queue Control
+
+KernelQ’s Python control plane now includes a **bounded queue**: a waiting line with a **fixed maximum size**.
+
+**Admission control** is the idea that the system **chooses whether to accept** a new job. When the queue is **full**, new jobs are **rejected** (instead of piling up without limit), which avoids an **unbounded backlog** and gives callers a clear signal to **back off** or **retry later**.
+
+This is an early **overload-protection** building block; a full production path would wire the same ideas into the API and metrics around Kafka dispatch.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:

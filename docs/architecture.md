@@ -90,6 +90,18 @@ In KernelQ, starvation and fairness concerns inform **how we design** the Python
 
 **Where it fits in KernelQ:** weighted round robin is **Python control plane scheduler logic**—the layer that decides **which tenant’s queue** (or which class of job) gets the next dispatch opportunity. Go workers **run** jobs; they do not decide global rotation and weights across tenants.
 
+## Bounded Queues and Admission Control
+
+A **bounded queue** is a waiting line with a **maximum capacity**. When it is full, the system **stops accepting more items** in that queue until space opens up (for example, after jobs are dispatched or complete). That cap is intentional: it keeps memory and backlog under control.
+
+**Admission control** is the policy that answers: **“Should we accept this new job right now?”** It runs *before* work enters deep queues or downstream systems. If the system is already saturated, admission control **rejects**, **rate-limits**, or **defers** new submissions instead of pretending everything can be handled immediately.
+
+**Why unbounded queues are dangerous in a distributed system:** if queues can grow without limit, overload in one place spreads as **unbounded memory use**, **long unpredictable delays**, and **cascading failures** (every component keeps accepting work it cannot finish). The failure mode becomes “the whole cluster falls over” rather than “the API says *not now* and clients back off.”
+
+**When KernelQ is full:** the **Python control plane** should **reject new work** (or apply an explicit overflow policy), not silently accept an **unlimited backlog**. Clients then know to **retry later**, **reduce load**, or **route elsewhere**. That protects Postgres, Kafka, and workers from being drowned by work the system cannot make progress on.
+
+**Where this fits in KernelQ:** bounded queues and admission control belong in the **Python control plane**, **before** jobs are **dispatched to Kafka**—at the API and scheduling layers where jobs are first admitted and queued. Once work is safely bounded and intentional at the edge, downstream components can rely on predictable load.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane
