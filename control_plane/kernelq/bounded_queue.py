@@ -2,8 +2,9 @@
 Bounded FIFO queue for jobs (in-memory).
 
 A bounded queue has a fixed maximum size. When it is full, new jobs are
-*rejected* (enqueue returns False) instead of growing forever. That pattern
-supports admission control: the system refuses work it cannot safely hold.
+*rejected* with ``REJECTED_FULL`` instead of growing forever. Invalid jobs
+(e.g. blank ``job_id``) get ``REJECTED_INVALID``. That pattern supports
+admission control: the system refuses work it cannot safely hold.
 
 This module uses only the Python standard library.
 """
@@ -12,6 +13,8 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+
+from .enqueue_result import EnqueueResult
 
 
 @dataclass(frozen=True)
@@ -36,16 +39,19 @@ class BoundedQueue:
         self._capacity: int = capacity
         self._items: deque[Job] = deque()
 
-    def enqueue(self, job: Job) -> bool:
+    def enqueue(self, job: Job) -> EnqueueResult:
         """
         Try to add a job to the back of the queue.
 
-        Returns True if the job was accepted, False if the queue is full.
+        Returns an :class:`EnqueueResult`: ``ACCEPTED``, ``REJECTED_FULL``,
+        or ``REJECTED_INVALID`` (e.g. blank ``job_id`` after stripping).
         """
+        if not job.job_id.strip():
+            return EnqueueResult.rejected_invalid()
         if len(self._items) >= self._capacity:
-            return False
+            return EnqueueResult.rejected_full()
         self._items.append(job)
-        return True
+        return EnqueueResult.accepted()
 
     def dequeue(self) -> Job | None:
         """

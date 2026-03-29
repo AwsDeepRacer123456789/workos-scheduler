@@ -5,16 +5,31 @@ Tests for the bounded FIFO job queue.
 import pytest
 
 from control_plane.kernelq.bounded_queue import BoundedQueue, Job
+from control_plane.kernelq.enqueue_result import EnqueueStatus
 
 
 def test_enqueue_succeeds_until_capacity_then_rejects():
-    """Jobs are accepted until the queue hits its limit; then enqueue returns False."""
+    """Valid jobs are accepted until full; then enqueue reports REJECTED_FULL."""
     q = BoundedQueue(capacity=3)
-    assert q.enqueue(Job("j1", 1)) is True
-    assert q.enqueue(Job("j2", 2)) is True
-    assert q.enqueue(Job("j3", 3)) is True
+    assert q.enqueue(Job("j1", 1)).status is EnqueueStatus.ACCEPTED
+    assert q.enqueue(Job("j2", 2)).status is EnqueueStatus.ACCEPTED
+    assert q.enqueue(Job("j3", 3)).status is EnqueueStatus.ACCEPTED
     assert q.is_full() is True
-    assert q.enqueue(Job("overflow", 4)) is False
+    overflow = q.enqueue(Job("overflow", 4))
+    assert overflow.status is EnqueueStatus.REJECTED_FULL
+
+
+def test_enqueue_rejects_blank_job_id():
+    """A job with a blank job_id is invalid and must not occupy queue space."""
+    q = BoundedQueue(capacity=3)
+    r = q.enqueue(Job("", 1))
+    assert r.status is EnqueueStatus.REJECTED_INVALID
+    assert r.is_accepted() is False
+    assert q.size() == 0
+
+    r2 = q.enqueue(Job("   ", 2))
+    assert r2.status is EnqueueStatus.REJECTED_INVALID
+    assert q.size() == 0
 
 
 def test_dequeue_fifo_order():

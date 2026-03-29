@@ -102,6 +102,22 @@ A **bounded queue** is a waiting line with a **maximum capacity**. When it is fu
 
 **Where this fits in KernelQ:** bounded queues and admission control belong in the **Python control plane**, **before** jobs are **dispatched to Kafka**—at the API and scheduling layers where jobs are first admitted and queued. Once work is safely bounded and intentional at the edge, downstream components can rely on predictable load.
 
+## Backpressure and Rejection Semantics
+
+**Backpressure** means the system **signals “slow down” upstream** when a downstream part is overloaded. Instead of every layer silently accepting unlimited work, pressure travels backward: clients may **retry later**, **send less traffic**, or **wait**, so the whole pipeline stays stable.
+
+**How bounded queues and admission control relate:** a **bounded queue** creates a natural **limit**; **admission control** is the **gate** that enforces it. When the queue is full, new submissions fail fast at the edge—that is a form of **backpressure** because upstream learns the system cannot absorb more work *right now*.
+
+**Why explicit rejection reasons beat a plain True/False:** a single boolean hides *why* something was refused. Operators and clients need to distinguish **overload** from **bad input** from **auth failures**, and so on. Typed outcomes (or error codes / structured errors) make behavior **explainable**, **testable**, and **observable**.
+
+**KernelQ-style outcomes to keep separate:**
+
+- **Accepted** — the job passed validation and was admitted under current capacity; it can progress through the lifecycle.
+- **Rejected: queue full** — the request may be fine, but the system is **temporarily saturated**; the right client behavior is usually **retry with backoff**, and operators watch **saturation metrics**.
+- **Rejected: invalid request/job** — the payload or job definition breaks rules (schema, constraints, impossible schedule); **retrying the same request will not help** until the client **fixes the input**.
+
+**Where this fits in KernelQ:** rejection semantics are enforced in the **Python control plane**—API validation, admission checks, and queueing—**before** work is **dispatched to Kafka**. That is where KernelQ can return **clear, distinct outcomes** to callers and attach **metrics and logs** per reason.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane
