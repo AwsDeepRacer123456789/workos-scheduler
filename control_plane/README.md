@@ -42,6 +42,12 @@ KernelQ’s Python control plane now includes a **bounded queue**: a waiting lin
 
 This is an early **overload-protection** building block; a full production path would wire the same ideas into the API and metrics around Kafka dispatch.
 
+## Backpressure Semantics
+
+KernelQ’s Python control plane can return **explicit enqueue outcomes** instead of a plain yes/no: each attempt is **accepted**, **rejected because the queue is full**, or **rejected because the job is invalid** (for example a blank `job_id`).
+
+That separation matters: overload is usually **retry with backoff**, while bad input needs a **client fix**. It is an early step toward **backpressure-aware APIs** and clearer **overload observability** (metrics and logs per reason).
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:
