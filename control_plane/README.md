@@ -48,6 +48,16 @@ KernelQ’s Python control plane can return **explicit enqueue outcomes** instea
 
 That separation matters: overload is usually **retry with backoff**, while bad input needs a **client fix**. It is an early step toward **backpressure-aware APIs** and clearer **overload observability** (metrics and logs per reason).
 
+## Current Combined Scheduler Design
+
+KernelQ now has a **composed scheduler prototype** in Python. Instead of using one isolated policy, it combines a few decisions in order.
+
+- **Admission first**: bounded queue capacity decides whether a new job is accepted.
+- **Fairness across tenants**: weighted round robin picks which tenant gets the next turn.
+- **Priority within a tenant**: higher-priority jobs run before lower-priority jobs.
+
+This is our first combined scheduling pipeline, but it is still an **in-memory prototype** in the control plane.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:

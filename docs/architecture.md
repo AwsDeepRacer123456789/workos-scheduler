@@ -118,6 +118,21 @@ A **bounded queue** is a waiting line with a **maximum capacity**. When it is fu
 
 **Where this fits in KernelQ:** rejection semantics are enforced in the **Python control plane**—API validation, admission checks, and queueing—**before** work is **dispatched to Kafka**. That is where KernelQ can return **clear, distinct outcomes** to callers and attach **metrics and logs** per reason.
 
+## Combined Scheduling Pipeline
+
+Real schedulers rarely rely on one isolated policy. In KernelQ, we now combine multiple scheduling decisions into one pipeline so the system can handle overload, fairness, and urgency together.
+
+The combined pipeline is:
+
+1. **Validate and admit jobs** using bounded queue rules. A job is accepted only if it is valid and there is queue capacity; otherwise it is rejected clearly (for example, invalid job or queue full).
+2. **Choose the next tenant** using **weighted round robin** fairness so one noisy tenant cannot dominate dispatch forever.
+3. **Choose the next job within that tenant** using **priority** so more urgent work can run first inside that tenant's queue.
+4. **Break ties by `created_at`** so jobs with equal priority are served in predictable oldest-first order.
+
+This is more realistic than pure FIFO or pure priority alone. Pure FIFO is simple but ignores urgency and cross-tenant fairness. Pure priority helps urgency but can starve some work. The combined pipeline is a practical middle ground that reflects how production schedulers are usually designed.
+
+This is still an **in-memory control-plane prototype** in Python. It is not yet wired to Kafka dispatch or persistent storage, so treat it as the scheduling model and decision flow, not a complete distributed runtime.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane
