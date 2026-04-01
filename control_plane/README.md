@@ -58,6 +58,12 @@ KernelQ now has a **composed scheduler prototype** in Python. Instead of using o
 
 This is our first combined scheduling pipeline, but it is still an **in-memory prototype** in the control plane.
 
+## Current Measurement Layer
+
+KernelQ now includes a small **scheduler metrics** module in Python (`scheduler_metrics.py`). It lets us tally **enqueue outcomes** (accepted vs full vs invalid), **dispatch counts** (totals, per tenant, per priority), and **peak queue depth** during simulations or tests.
+
+A **simulation script** (`scripts/simulate_composed_scheduler.py`) runs a **repeatable** composed-scheduler experiment so we can inspect ordering and counters **before** Kafka and persistence are wired in.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:
