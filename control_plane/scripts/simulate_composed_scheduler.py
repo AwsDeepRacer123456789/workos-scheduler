@@ -39,16 +39,16 @@ def main() -> None:
     # - Two more valid jobs so the queue reaches exactly `capacity` (6).
     # - One more valid job while full → REJECTED_FULL.
     workload: list[Job] = [
-        Job("a-low", "tenant-a", priority=1, created_at=10),
-        Job("b-one", "tenant-b", priority=5, created_at=20),
-        Job("a-high", "tenant-a", priority=10, created_at=30),
-        Job("b-two", "tenant-b", priority=1, created_at=40),
+        Job("a-low", "tenant-a", priority=1, created_at=-8),
+        Job("b-one", "tenant-b", priority=5, created_at=-7),
+        Job("a-high", "tenant-a", priority=10, created_at=-6),
+        Job("b-two", "tenant-b", priority=1, created_at=-5),
         # Invalid: empty job_id (validation fails before capacity check).
-        Job("", "tenant-a", priority=1, created_at=50),
-        Job("a-mid", "tenant-a", priority=5, created_at=60),
-        Job("b-three", "tenant-b", priority=2, created_at=70),
+        Job("", "tenant-a", priority=1, created_at=-4),
+        Job("a-mid", "tenant-a", priority=5, created_at=-3),
+        Job("b-three", "tenant-b", priority=2, created_at=-2),
         # Seventh submission: queue already has 6 jobs → rejected_full.
-        Job("overflow", "tenant-a", priority=99, created_at=100),
+        Job("overflow", "tenant-a", priority=99, created_at=-1),
     ]
 
     sched = ComposedScheduler(capacity=capacity, weights=weights)
@@ -71,14 +71,17 @@ def main() -> None:
     print("=== Dequeue phase (until empty) ===\n")
 
     dispatch_order: list[str] = []
+    # Simple deterministic dispatch clock: starts at 0, ticks by 1 per dispatch.
+    dispatch_tick = 0
     while True:
         job = sched.dequeue()
         if job is None:
             break
-        metrics.record_dispatch(job)
+        metrics.record_dispatch(job, dispatch_time=dispatch_tick)
         metrics.observe_queue_depth(sched.size())
         dispatch_order.append(job.job_id)
         print(f"  dispatch {job.job_id!r} (tenant={job.tenant_id!r}, priority={job.priority})")
+        dispatch_tick += 1
 
     print()
     print("=== Summary ===\n")
@@ -90,6 +93,15 @@ def main() -> None:
     print()
     print("Dispatch order (job_id):")
     print("  " + " -> ".join(dispatch_order))
+
+    print()
+    print("=== Wait Time Summary ===\n")
+    print(f"  average_queue_wait_time: {metrics.average_queue_wait_time()}")
+    print(f"  average_queue_wait_time_by_tenant: {metrics.average_queue_wait_time_by_tenant()}")
+    print(
+        "  average_queue_wait_time_by_priority: "
+        f"{metrics.average_queue_wait_time_by_priority()}"
+    )
 
     print()
     print("Final metric snapshot:")

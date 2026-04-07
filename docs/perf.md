@@ -31,6 +31,26 @@ For the **composed scheduler prototype** (bounded admission, weighted round robi
 | `dispatch_count_by_priority` | Counts of dequeued jobs grouped by priority value | Confirms that higher-priority work is actually selected more often within each tenant when both exist |
 | `queue_depth_peak` | The largest number of jobs waiting across all tenants at any point during the run | Captures worst-case backlog in the simulation; helps reason about memory and delay under load |
 
+## Queue Wait Time and Fairness Metrics
+
+**Queue wait time** is how long a job sits in the queue before it is dispatched. In plain terms: after a job is accepted, how long does it wait for its turn?
+
+Wait time is often more useful than dispatch count alone. Dispatch count tells us how many jobs moved, but not whether jobs waited too long. A scheduler can dispatch many jobs and still feel unfair or slow if some jobs are stuck in line.
+
+We track wait time in three views:
+
+- **Overall**: tells us the general queueing health of the system.
+- **By tenant**: shows fairness across customers and helps detect noisy-neighbor effects.
+- **By priority**: verifies that higher-priority work actually gets faster service.
+
+| Metric | What it means | Why it matters |
+|--------|---------------|----------------|
+| `average_queue_wait_time` | Average wait from enqueue to dispatch across all jobs | Baseline user-facing queue delay for the whole scheduler |
+| `average_queue_wait_time_by_tenant` | Average queue wait grouped by tenant id | Exposes fairness imbalances between tenants |
+| `average_queue_wait_time_by_priority` | Average queue wait grouped by priority value | Confirms priority policy is producing the expected latency ordering |
+| `dispatch_count_by_tenant` | Number of dispatched jobs per tenant | Useful alongside wait-time-by-tenant to understand share vs delay |
+| `dispatch_count_by_priority` | Number of dispatched jobs per priority | Useful alongside wait-time-by-priority to understand urgency handling |
+
 ## Load Testing Methodology
 
 TODO: Define test scenarios, load profiles, ramp-up strategies, and success criteria.

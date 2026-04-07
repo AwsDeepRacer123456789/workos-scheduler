@@ -64,6 +64,14 @@ KernelQ now includes a small **scheduler metrics** module in Python (`scheduler_
 
 A **simulation script** (`scripts/simulate_composed_scheduler.py`) runs a **repeatable** composed-scheduler experiment so we can inspect ordering and counters **before** Kafka and persistence are wired in.
 
+## Current Scheduling Evaluation
+
+KernelQ now measures **queue wait time** in the Python control-plane prototype, not just how many jobs were dispatched.
+
+This lets us compare both **dispatch behavior** and **waiting behavior** by tenant and by priority.
+
+That view helps us evaluate **fairness vs urgency tradeoffs** early, before Kafka and worker execution are fully wired in.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:
