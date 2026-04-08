@@ -72,6 +72,16 @@ This lets us compare both **dispatch behavior** and **waiting behavior** by tena
 
 That view helps us evaluate **fairness vs urgency tradeoffs** early, before Kafka and worker execution are fully wired in.
 
+## Scheduler Comparison
+
+KernelQ now includes a script (`scripts/compare_schedulers.py`) to compare multiple scheduling policies side by side.
+
+All schedulers run on the **same fixed workload**, so differences in results come from scheduling policy, not from different inputs.
+
+We compare **wait time**, **fairness across tenants**, and **dispatch behavior** to understand tradeoffs clearly.
+
+This gives us a practical way to evaluate policy choices before Kafka dispatch and worker execution are fully integrated.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:
