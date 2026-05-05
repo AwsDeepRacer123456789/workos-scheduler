@@ -82,6 +82,14 @@ We compare **wait time**, **fairness across tenants**, and **dispatch behavior**
 
 This gives us a practical way to evaluate policy choices before Kafka dispatch and worker execution are fully integrated.
 
+## Control Plane API
+
+KernelQ now includes a **FastAPI-based REST control-plane API** for managing jobs and monitoring scheduler metrics.
+
+The API includes endpoints to **enqueue jobs**, **query job states**, **cancel jobs**, **retry failed jobs**, and **retrieve scheduling metrics**.
+
+It is designed so external clients and internal services can interact with the KernelQ scheduler through a clear HTTP interface.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:
