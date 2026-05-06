@@ -90,6 +90,16 @@ The API includes endpoints to **enqueue jobs**, **query job states**, **cancel j
 
 It is designed so external clients and internal services can interact with the KernelQ scheduler through a clear HTTP interface.
 
+Basic API tests now live in `tests/test_api.py` using FastAPI `TestClient`, so endpoint behavior is checked automatically (not only with manual curl requests).
+
+## API Test Coverage
+
+The control plane now has automated API tests using FastAPI `TestClient`.
+
+These tests verify enqueue, query, cancel, retry, metrics, and error behavior.
+
+This makes the API safer to change before we connect Postgres, Kafka, and Go workers.
+
 ## What job_state.py Models
 
 The `job_state.py` file defines the job lifecycle state machine. It models:

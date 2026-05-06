@@ -182,6 +182,30 @@ curl -X POST http://127.0.0.1:8000/jobs/job-123/enqueue \
   -d '{"job_id":"job-123","tenant_id":"tenant-a","priority":10}'
 ```
 
+### Automated API Tests
+
+Alongside manual checks in Postman/`curl`, KernelQ now includes API tests in `control_plane/tests/test_api.py` using FastAPI `TestClient`.
+
+These tests cover core outcomes such as:
+- `200` for successful enqueue/cancel/metrics requests
+- `404` for missing jobs
+- `409` for invalid retry state transitions
+- `422` for schema validation errors (missing required fields)
+
+## API Testing and OpenAPI
+
+FastAPI automatically generates an **OpenAPI schema** from your route definitions and Pydantic models.
+
+When the server is running locally, interactive API docs are available at **`/docs`** (for example: `http://127.0.0.1:8000/docs`).
+
+We now test this API with FastAPI **`TestClient`** in `control_plane/tests/test_api.py`, so important behavior is checked automatically.
+
+The tests cover both success and failure paths, including:
+- `200` success responses
+- `404` missing job
+- `409` invalid state transition
+- `422` request validation error
+
 ## Internal gRPC APIs
 
 The control plane (Python) and worker plane (Go) communicate via gRPC for:
