@@ -13,6 +13,40 @@ The control plane is written in Python because:
 
 The control plane doesn't need to be super fast—it handles lower-frequency operations like API requests and scheduling decisions. The worker plane (written in Go) handles the high-speed task execution.
 
+## Local Setup
+
+Use these commands from the repository root.
+
+1) Install dependencies:
+
+```bash
+python3 -m pip install -r control_plane/requirements.txt
+```
+
+2) Run all control-plane tests:
+
+```bash
+python3 -m pytest control_plane/tests
+```
+
+3) Start the FastAPI server:
+
+```bash
+python3 -m uvicorn control_plane.api:app --reload
+```
+
+4) View API docs:
+
+- `http://127.0.0.1:8000/docs`
+
+5) Health check:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Note: this setup is local-only for now. Docker and cloud deployment will come later.
+
 ## Responsibilities
 
 The control plane is responsible for:

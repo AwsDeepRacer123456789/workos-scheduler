@@ -2,6 +2,42 @@
 
 ## Local Development
 
+## Local Control Plane Setup
+
+This section is the fastest way to run the current Python control plane on your machine.
+
+Prerequisite:
+- Python 3
+
+1. Install dependencies:
+
+```bash
+python3 -m pip install -r control_plane/requirements.txt
+```
+
+2. Run control-plane tests:
+
+```bash
+python3 -m pytest control_plane/tests
+```
+
+3. Run the API:
+
+```bash
+python3 -m uvicorn control_plane.api:app --reload
+```
+
+4. Open API docs:
+- `http://127.0.0.1:8000/docs`
+
+5. Health endpoint:
+- `http://127.0.0.1:8000/health`
+
+Notes for deployment planning:
+- This setup is local-only and **not Dockerized yet**.
+- It is **not connected yet** to Postgres, Kafka, Redis, or Go workers.
+- Those integrations will be added later as the deployment path matures.
+
 ### Docker Compose Setup
 
 TODO: Create docker-compose.yml with:
