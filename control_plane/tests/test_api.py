@@ -39,6 +39,29 @@ def test_get_metrics_returns_200():
     assert "enqueue_accepted_count" in body
 
 
+def test_get_health_returns_200_and_expected_payload():
+    """Shallow health: process is up; checks fixed fields."""
+    client = TestClient(app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "kernelq-control-plane"
+    assert body["version"] == "0.1.0"
+
+
+def test_openapi_json_returns_200_with_api_metadata():
+    """FastAPI exposes OpenAPI at /openapi.json for docs and tooling."""
+    client = TestClient(app)
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    spec = response.json()
+    assert spec["info"]["title"] == "KernelQ Control Plane API"
+    assert spec["info"]["version"] == "0.1.0"
+
+
 def test_get_missing_job_returns_404():
     client = TestClient(app)
     response = client.get("/jobs/missing-id")

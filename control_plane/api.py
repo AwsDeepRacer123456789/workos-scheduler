@@ -105,11 +105,40 @@ class MessageResponse(BaseModel):
 # FastAPI application and endpoints
 # ---------------------------------------------------------------------------
 
+# API version: used in OpenAPI metadata and the shallow /health response.
+API_VERSION = "0.1.0"
+
 app = FastAPI(
     title="KernelQ Control Plane API",
-    description="Beginner-friendly in-memory API for job state management.",
-    version="0.1.0",
+    version=API_VERSION,
+    description=(
+        "Python control-plane API for KernelQ. This service owns scheduling decisions, "
+        "job state for the prototype, and metrics exposure. It runs in-memory today; "
+        "Postgres, Kafka, and worker integration come later."
+    ),
 )
+
+
+@app.get(
+    "/health",
+    summary="Shallow health check",
+    description=(
+        "Returns OK if this process is running. This does not check databases, "
+        "Kafka, Redis, or workers—that will be a separate readiness path later."
+    ),
+)
+def health() -> dict[str, str]:
+    """
+    Shallow liveness check only.
+
+    Confirms the FastAPI app can handle requests. Deeper checks (DB, broker, workers)
+    are intentionally not included yet.
+    """
+    return {
+        "status": "ok",
+        "service": "kernelq-control-plane",
+        "version": API_VERSION,
+    }
 
 
 @app.get(

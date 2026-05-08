@@ -32,6 +32,7 @@ KernelQ now includes an in-memory **FastAPI-based control-plane API** (`control_
 
 ### Route Summary
 
+- `GET /health`: shallow liveness check—API process is responding.
 - `GET /jobs/{job_id}`: fetch one job's current state and details.
 - `POST /jobs/{job_id}/enqueue`: validate and enqueue a job.
 - `POST /jobs/{job_id}/cancel`: cancel a job (state transition to `canceled` when valid).
@@ -192,11 +193,24 @@ These tests cover core outcomes such as:
 - `409` for invalid retry state transitions
 - `422` for schema validation errors (missing required fields)
 
+## Health Checks and OpenAPI
+
+**`GET /health`** answers a simple question: *Can this control-plane HTTP process accept requests right now?* If it returns successfully, callers know the API process is up—not that every dependency in the wider system is healthy.
+
+Today’s health check is **shallow**: it confirms the FastAPI service is responding and returns a small JSON payload (status, service name, API version). It does **not** probe databases, the message broker, cache, or workers.
+
+Later we will add **deeper checks**—for example Postgres connectivity, Kafka health, Redis (if used), and worker heartbeats or readiness—which often ship as separate **readiness** vs **liveness** endpoints used by orchestrators.
+
+**Automatic API documentation (FastAPI):**
+
+- **`/docs`** — Interactive Swagger UI: browse routes, see request bodies, try calls in the browser while the server is running (for example `http://127.0.0.1:8000/docs`).
+- **`/openapi.json`** — The raw OpenAPI schema (machine-readable contract). Clients, gateways, and tools can consume this to generate SDKs or validate integrations.
+
+Together, `/docs` and `/openapi.json` make the API **discoverable and versionable**—useful both when learning the system and in interviews when you explain how you expose contracts beyond ad-hoc curl examples.
+
 ## API Testing and OpenAPI
 
-FastAPI automatically generates an **OpenAPI schema** from your route definitions and Pydantic models.
-
-When the server is running locally, interactive API docs are available at **`/docs`** (for example: `http://127.0.0.1:8000/docs`).
+Automated tests also assert **`/openapi.json`** returns metadata such as API title and version (see `control_plane/tests/test_api.py`).
 
 We now test this API with FastAPI **`TestClient`** in `control_plane/tests/test_api.py`, so important behavior is checked automatically.
 

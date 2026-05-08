@@ -90,11 +90,17 @@ The API includes endpoints to **enqueue jobs**, **query job states**, **cancel j
 
 It is designed so external clients and internal services can interact with the KernelQ scheduler through a clear HTTP interface.
 
-Basic API tests now live in `tests/test_api.py` using FastAPI `TestClient`, so endpoint behavior is checked automatically (not only with manual curl requests).
+## Health Check and OpenAPI
+
+The control plane exposes **`GET /health`** so load balancers and people can confirm the API process is up. For now it is a **shallow** check only (it does not probe dependencies).
+
+FastAPI serves **interactive docs at `/docs`** and the **OpenAPI spec at `/openapi.json`** while the server is running.
+
+Deeper checks for **Kafka, Postgres, and Redis** (and workers) will be added when those pieces are integrated.
 
 ## API Test Coverage
 
-The control plane now has automated API tests using FastAPI `TestClient`.
+Automated API tests live in `tests/test_api.py` using FastAPI `TestClient`, so endpoint behavior is checked automatically (not only with manual curl requests).
 
 These tests verify enqueue, query, cancel, retry, metrics, and error behavior.
 
