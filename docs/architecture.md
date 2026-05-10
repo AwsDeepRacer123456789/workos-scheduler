@@ -133,6 +133,32 @@ This is more realistic than pure FIFO or pure priority alone. Pure FIFO is simpl
 
 This is still an **in-memory control-plane prototype** in Python. It is not yet wired to Kafka dispatch or persistent storage, so treat it as the scheduling model and decision flow, not a complete distributed runtime.
 
+## PostgreSQL as Durable Job State Store
+
+KernelQ’s scheduling logic and API prototypes often keep jobs **in memory** for speed and simplicity during development. That is fine for experiments, but **memory is not durable**: restart the process, lose power, or deploy a new instance and **unpersisted job rows disappear**.
+
+**PostgreSQL becomes the durable source of truth for jobs** in KernelQ. Once a job is written to Postgres, the control plane, workers, and operators can agree on **what exists**, **what state it is in**, and **what happened last**—even after crashes, rolling deploys, or scaling out.
+
+Jobs need **durable state** so the system can **recover**: retries don’t double-book mystery work, dashboards stay truthful, and dispatch decisions can resume from a consistent checkpoint instead of guessing.
+
+The **`jobs` table** holds what every participant needs to coordinate:
+
+- **tenant_id** and **priority** for fairness and scheduling policy inputs  
+- **state** for the lifecycle (queued, running, failed, and so on)  
+- **retry_count** and **max_retries** for explicit retry policy  
+- **payload** (typically JSON) for client-provided or enriched job inputs  
+- **created_at** / **updated_at** for auditing and ordering  
+
+**Indexes** make common queries fast at scale (interview point: *indexes match your read patterns*):
+
+- **state** — “How many jobs are queued?” / “List everything stuck in *failed*”  
+- **tenant_id** — per-customer views, quotas, and support lookups  
+- **priority** — “Run the most important work first” within a policy  
+- **(state, tenant_id)** — “What is this customer still waiting on in *queued*?” (very common operationally)  
+- **(state, priority)** — “Among jobs ready to run, which should we pick next by priority?”
+
+Together, durable rows + the right indexes turn KernelQ from a demo into something you can run in production and reason about when things go wrong.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane

@@ -1,0 +1,21 @@
+# Local development: Postgres only (KernelQ). Add more services as the project grows.
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Logs:    docker compose logs -f postgres
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: kernelq-postgres
+    environment:
+      POSTGRES_DB: kernelq
+      POSTGRES_USER: kernelq
+      POSTGRES_PASSWORD: kernelq_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - kernelq_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  kernelq_postgres_data:

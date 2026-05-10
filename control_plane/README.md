@@ -47,6 +47,24 @@ curl http://127.0.0.1:8000/health
 
 Note: this setup is local-only for now. Docker and cloud deployment will come later.
 
+## Local Postgres
+
+KernelQ includes a **local Postgres** service in the repo’s Docker Compose file. Postgres will hold **durable job state** so jobs survive restarts and can be shared across processes.
+
+The first migration, `control_plane/migrations/001_create_jobs.sql`, creates the **`jobs`** table. **Wiring the FastAPI API to Postgres** comes in a later step.
+
+From the repository root:
+
+```bash
+docker compose up -d postgres
+```
+
+Apply the migration:
+
+```bash
+docker exec -i kernelq-postgres psql -U kernelq -d kernelq < control_plane/migrations/001_create_jobs.sql
+```
+
 ## Responsibilities
 
 The control plane is responsible for:

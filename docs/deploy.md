@@ -34,26 +34,82 @@ python3 -m uvicorn control_plane.api:app --reload
 - `http://127.0.0.1:8000/health`
 
 Notes for deployment planning:
-- This setup is local-only and **not Dockerized yet**.
-- It is **not connected yet** to Postgres, Kafka, Redis, or Go workers.
+- This setup is local-only; the **API runs on your machine** (Postgres can run in Docker—see **Local PostgreSQL Setup**).
+- The API is **not wired yet** to Postgres, Kafka, Redis, or Go workers in production style.
 - Those integrations will be added later as the deployment path matures.
+
+## Local PostgreSQL Setup
+
+KernelQ ships a **Postgres** service in `docker-compose.yml` for local development. Run these commands from the **repository root**.
+
+**1. Start Postgres in the background**
+
+```bash
+docker compose up -d postgres
+```
+
+**2. Confirm the container is running**
+
+```bash
+docker compose ps
+```
+
+You should see `kernelq-postgres` (or the compose service name) listed as running.
+
+**3. Open an interactive SQL shell inside the container**
+
+```bash
+docker exec -it kernelq-postgres psql -U kernelq -d kernelq
+```
+
+- `-U kernelq` is the database user (matches `POSTGRES_USER` in compose).
+- `-d kernelq` is the database name (matches `POSTGRES_DB`).
+
+**4. Apply the first migration (from your host machine, not inside psql)**
+
+Leave psql if you are already inside it (`\q`), then run:
+
+```bash
+docker exec -i kernelq-postgres psql -U kernelq -d kernelq < control_plane/migrations/001_create_jobs.sql
+```
+
+- `-i` lets Docker attach stdin so the SQL file is piped into `psql`.
+- This creates the `jobs` table (and indexes) idempotently where the migration uses `IF NOT EXISTS`.
+
+**5. Verify the table exists**
+
+Connect again with `docker exec -it kernelq-postgres psql -U kernelq -d kernelq`, then at the `psql` prompt:
+
+```text
+\dt
+```
+
+You should see `jobs` listed among relations.
+
+**6. Quit psql**
+
+```text
+\q
+```
+
+That returns you to your normal terminal shell.
 
 ### Docker Compose Setup
 
-TODO: Create docker-compose.yml with:
-- Postgres database
+The repo includes `docker-compose.yml` with a **Postgres 16** service for local development (see **Local PostgreSQL Setup** above).
+
+TODO later:
 - Redis instance
-- Message broker (RabbitMQ or Redis Streams)
-- Control plane API (Python FastAPI)
+- Message broker (Kafka)
+- Control plane API container (Python FastAPI)
 - Worker processes (Go)
 
 ### Running Locally
 
 TODO: Document commands to:
-- Start all services: `docker-compose up`
-- Run migrations: `python manage.py migrate`
-- Seed test data: `python scripts/seed.py`
-- View logs: `docker-compose logs -f`
+- Start full stack: `docker compose up`
+- Seed test data (when scripts exist)
+- View logs: `docker compose logs -f`
 
 ## Cloud Deployment (AWS)
 
