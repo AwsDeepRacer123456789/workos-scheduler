@@ -94,6 +94,38 @@ You should see `jobs` listed among relations.
 
 That returns you to your normal terminal shell.
 
+## Running Repository Tests
+
+Integration tests in `control_plane/tests/test_job_repository.py` talk to **real Postgres** on your machine. **Most other control-plane unit tests do not need Postgres** and can run without Docker.
+
+From the repository root:
+
+**1. Start Postgres**
+
+```bash
+docker compose up -d postgres
+```
+
+**2. Apply migration if needed** (safe to re-run when the SQL uses `IF NOT EXISTS`)
+
+```bash
+docker exec -i kernelq-postgres psql -U kernelq -d kernelq < control_plane/migrations/001_create_jobs.sql
+```
+
+**3. Install Python dependencies** (includes `psycopg`)
+
+```bash
+python3 -m pip install -r control_plane/requirements.txt
+```
+
+**4. Run repository tests only**
+
+```bash
+python3 -m pytest control_plane/tests/test_job_repository.py
+```
+
+If Postgres is not running, these tests will skip or fail when connecting—start the container first.
+
 ### Docker Compose Setup
 
 The repo includes `docker-compose.yml` with a **Postgres 16** service for local development (see **Local PostgreSQL Setup** above).

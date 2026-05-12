@@ -159,6 +159,16 @@ The **`jobs` table** holds what every participant needs to coordinate:
 
 Together, durable rows + the right indexes turn KernelQ from a demo into something you can run in production and reason about when things go wrong.
 
+## Repository Layer
+
+The Python control plane now includes a **repository layer** for job persistence (for example `JobRepository` alongside a small DB connection helper). Routes and scheduling code call **repository methods** instead of embedding long SQL strings everywhere.
+
+The repository **hides SQL details** behind a small, testable surface: create, read, update, and delete jobs by intent. That keeps HTTP handlers and policy code readable and makes it easier to swap or mock storage in tests.
+
+**Postgres remains the durable source of truth** for job state: the repository is how the application reads and writes that truth, not a second copy of business rules.
+
+Queries use **parameterized SQL** (bound parameters, not Python string formatting) so values are never concatenated into query text—a basic safety and correctness practice you should mention in interviews when discussing SQL injection and maintainable data access.
+
 ## Data Flow
 
 1. **Enqueue**: Client sends job request via REST API to control plane

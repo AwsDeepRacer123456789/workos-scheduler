@@ -65,6 +65,16 @@ Apply the migration:
 docker exec -i kernelq-postgres psql -U kernelq -d kernelq < control_plane/migrations/001_create_jobs.sql
 ```
 
+## Postgres Repository Layer
+
+KernelQ now includes a small **Python repository layer** for the **`jobs`** table (`kernelq/job_repository.py` plus `kernelq/db.py` for connections).
+
+It supports **create**, **fetch by id**, **update state**, and **delete**—so SQL stays in one place instead of spreading across API handlers.
+
+**Repository tests** (`tests/test_job_repository.py`) need the **local Postgres container** running and the **migration** applied first.
+
+**API integration** with this repository will be wired in a later step; the FastAPI app can still use in-memory state until then.
+
 ## Responsibilities
 
 The control plane is responsible for:

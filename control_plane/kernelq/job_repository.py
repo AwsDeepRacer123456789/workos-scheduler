@@ -1,0 +1,148 @@
+"""
+Persist and load KernelQ jobs in PostgreSQL.
+
+The API layer should not embed SQL strings everywhere. This small repository
+keeps INSERT/SELECT/UPDATE/DELETE in one place and uses parameterized queries
+so values are never pasted into SQL as raw strings (safer and clearer).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from psycopg import Connection
+from psycopg.rows import dict_row
+from psycopg.types.json import Json
+
+
+@dataclass
+class JobRecord:
+    """One row from the ``jobs`` table, mapped to Python types."""
+
+    job_id: str
+    tenant_id: str
+    priority: int
+    state: str
+    payload: dict[str, Any]
+    retry_count: int
+    max_retries: int
+    created_at: object
+    updated_at: object
+
+
+def _row_to_record(row: dict[str, Any]) -> JobRecord:
+    """Build a JobRecord from a dict-shaped query row."""
+    raw_payload = row.get("payload")
+    if isinstance(raw_payload, dict):
+        payload = dict(raw_payload)
+    else:
+        # JSON objects map to dict; if we ever see something else, keep a safe empty dict.
+        payload = {}
+
+    return JobRecord(
+        job_id=row["job_id"],
+        tenant_id=row["tenant_id"],
+        priority=row["priority"],
+        state=row["state"],
+        payload=payload,
+        retry_count=row["retry_count"],
+        max_retries=row["max_retries"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+class JobRepository:
+    """CRUD-style access to the ``jobs`` table using an existing psycopg connection."""
+
+    def __init__(self, conn: Connection) -> None:
+        self._conn = conn
+
+    def create_job(
+        self,
+        job_id: str,
+        tenant_id: str,
+        priority: int,
+        state: str,
+        payload: dict[str, Any] | None = None,
+        max_retries: int = 3,
+    ) -> JobRecord:
+        """Insert a new job row and return the stored record (including timestamps)."""
+        data = payload if payload is not None else {}
+
+        sql = """
+            INSERT INTO jobs (job_id, tenant_id, priority, state, payload, max_retries)
+            VALUES (%(job_id)s, %(tenant_id)s, %(priority)s, %(state)s, %(payload)s, %(max_retries)s)
+            RETURNING
+                job_id, tenant_id, priority, state, payload,
+                retry_count, max_retries, created_at, updated_at
+        """
+        params = {
+            "job_id": job_id,
+            "tenant_id": tenant_id,
+            "priority": priority,
+            "state": state,
+            "payload": Json(data),
+            "max_retries": max_retries,
+        }
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            assert row is not None
+
+        self._conn.commit()
+        return _row_to_record(row)
+
+    def get_job(self, job_id: str) -> JobRecord | None:
+        """Load one job by primary key, or None if it does not exist."""
+        sql = """
+            SELECT
+                job_id, tenant_id, priority, state, payload,
+                retry_count, max_retries, created_at, updated_at
+            FROM jobs
+            WHERE job_id = %(job_id)s
+        """
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, {"job_id": job_id})
+            row = cur.fetchone()
+
+        self._conn.commit()
+        if row is None:
+            return None
+        return _row_to_record(row)
+
+    def update_job_state(self, job_id: str, new_state: str) -> JobRecord | None:
+        """Set ``state`` and bump ``updated_at``; return the row or None if missing."""
+        sql = """
+            UPDATE jobs
+            SET state = %(new_state)s, updated_at = NOW()
+            WHERE job_id = %(job_id)s
+            RETURNING
+                job_id, tenant_id, priority, state, payload,
+                retry_count, max_retries, created_at, updated_at
+        """
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, {"job_id": job_id, "new_state": new_state})
+            row = cur.fetchone()
+
+        if row is None:
+            self._conn.rollback()
+            return None
+
+        self._conn.commit()
+        return _row_to_record(row)
+
+    def delete_job(self, job_id: str) -> bool:
+        """Delete a job by id. Returns True if a row was removed (handy for tests)."""
+        sql = "DELETE FROM jobs WHERE job_id = %(job_id)s"
+
+        with self._conn.cursor() as cur:
+            cur.execute(sql, {"job_id": job_id})
+            deleted = cur.rowcount > 0
+
+        self._conn.commit()
+        return deleted
