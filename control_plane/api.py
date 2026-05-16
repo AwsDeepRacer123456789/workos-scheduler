@@ -1,68 +1,78 @@
 """
-FastAPI control-plane API (in-memory prototype).
+FastAPI control-plane API for KernelQ.
 
-This module exposes a small set of endpoints for job lifecycle operations:
-- Get a job's current state/details
-- Enqueue a job
-- Cancel a job
-- Retry a failed job
-- Read scheduler metrics
-
-Notes:
-- This is intentionally simple and beginner-friendly.
-- Data is in-memory only (no Postgres/Kafka yet).
+Job rows are stored in PostgreSQL through JobRepository. Scheduling queues and
+Kafka dispatch are not wired here yet—this module focuses on HTTP + durable state.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Path
+from psycopg import Error as PsycopgError
+from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, Field
 
-from control_plane.kernelq.job_state import JobState, can_transition, explain_transition
-from control_plane.kernelq.scheduler_composed import ComposedScheduler
-from control_plane.kernelq.scheduler_composed import Job as SchedulerJob
+from control_plane.kernelq.db import connect
+from control_plane.kernelq.enqueue_result import EnqueueStatus
+from control_plane.kernelq.job_repository import JobRepository
+from control_plane.kernelq.job_state import TERMINAL_STATES, JobState, can_transition, explain_transition
 from control_plane.kernelq.scheduler_metrics import SchedulerMetrics
 
 
-# ---------------------------------------------------------------------------
-# In-memory control-plane wiring
-# ---------------------------------------------------------------------------
-
-WEIGHTS = {"tenant-a": 2, "tenant-b": 1}
-CAPACITY = 6
-
-# Shared in-memory objects for this process.
-scheduler = ComposedScheduler(capacity=CAPACITY, weights=WEIGHTS)
+# In-process metrics only (not persisted to Postgres).
 metrics = SchedulerMetrics()
 
 
-@dataclass
-class JobRecord:
-    """Internal record for API-managed job metadata/state."""
+def get_repository() -> JobRepository:
+    """
+    Open a new database connection and wrap it in a JobRepository.
 
-    job_id: str
-    tenant_id: str
-    priority: int
-    created_at: int
-    state: JobState
-
-
-# In-memory "database": job_id -> JobRecord
-job_store: dict[str, JobRecord] = {}
+    Callers should close the connection when finished (see ``_close_repository``).
+    Connection pooling can be added later.
+    """
+    conn = connect()
+    return JobRepository(conn)
 
 
-# Simple deterministic created_at clock for this prototype.
-_created_at_counter = 0
+def _close_repository(repo: JobRepository) -> None:
+    """Close the underlying psycopg connection for a repository."""
+    repo._conn.close()
 
 
-def _next_created_at() -> int:
-    global _created_at_counter
-    value = _created_at_counter
-    _created_at_counter += 1
-    return value
+def _parse_state(state_value: str) -> JobState:
+    """Convert a stored state string to JobState, or raise if unknown."""
+    try:
+        return JobState(state_value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Job has unknown state {state_value!r} in database",
+        ) from exc
+
+
+def _record_to_response(record: Any) -> "JobResponse":
+    """Map a repository JobRecord to the public API response model."""
+    created_at = record.created_at
+    updated_at = record.updated_at
+    if isinstance(created_at, datetime):
+        created_at = int(created_at.timestamp())
+    if isinstance(updated_at, datetime):
+        updated_at = int(updated_at.timestamp())
+
+    return JobResponse(
+        job_id=record.job_id,
+        tenant_id=record.tenant_id,
+        priority=record.priority,
+        state=record.state,
+        payload=record.payload,
+        retry_count=record.retry_count,
+        max_retries=record.max_retries,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +99,12 @@ class JobResponse(BaseModel):
     job_id: str
     tenant_id: str
     priority: int
-    created_at: int
     state: str
+    payload: dict[str, Any]
+    retry_count: int
+    max_retries: int
+    created_at: int
+    updated_at: int
 
 
 class MessageResponse(BaseModel):
@@ -105,16 +119,14 @@ class MessageResponse(BaseModel):
 # FastAPI application and endpoints
 # ---------------------------------------------------------------------------
 
-# API version: used in OpenAPI metadata and the shallow /health response.
 API_VERSION = "0.1.0"
 
 app = FastAPI(
     title="KernelQ Control Plane API",
     version=API_VERSION,
     description=(
-        "Python control-plane API for KernelQ. This service owns scheduling decisions, "
-        "job state for the prototype, and metrics exposure. It runs in-memory today; "
-        "Postgres, Kafka, and worker integration come later."
+        "Python control-plane API for KernelQ. Jobs are persisted in PostgreSQL. "
+        "Scheduling queues and Kafka worker dispatch will be integrated in later steps."
     ),
 )
 
@@ -128,12 +140,7 @@ app = FastAPI(
     ),
 )
 def health() -> dict[str, str]:
-    """
-    Shallow liveness check only.
-
-    Confirms the FastAPI app can handle requests. Deeper checks (DB, broker, workers)
-    are intentionally not included yet.
-    """
+    """Shallow liveness check only."""
     return {
         "status": "ok",
         "service": "kernelq-control-plane",
@@ -145,74 +152,91 @@ def health() -> dict[str, str]:
     "/jobs/{job_id}",
     response_model=JobResponse,
     summary="Get a job by ID",
-    description="Return current job state and job details (tenant, priority, created_at).",
+    description="Return current job state and details from Postgres.",
 )
 def get_job(job_id: str = Path(..., description="Job ID")) -> JobResponse:
     """Fetch job state/details by id, or return 404 if unknown."""
-    record = job_store.get(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    repo = get_repository()
+    try:
+        try:
+            record = repo.get_job(job_id)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while loading job: {exc}",
+            ) from exc
 
-    return JobResponse(
-        job_id=record.job_id,
-        tenant_id=record.tenant_id,
-        priority=record.priority,
-        created_at=record.created_at,
-        state=record.state.value,
-    )
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+
+        return _record_to_response(record)
+    finally:
+        _close_repository(repo)
 
 
 @app.post(
     "/jobs/{job_id}/enqueue",
     response_model=MessageResponse,
     summary="Enqueue a job",
-    description=(
-        "Validate request fields, enqueue into the in-memory control plane, "
-        "and mark job state as queued when accepted."
-    ),
+    description="Validate the request and persist a new job in Postgres with state queued.",
 )
 def enqueue_job(
     payload: EnqueueJobRequest,
     job_id: str = Path(..., description="Job ID in URL"),
 ) -> MessageResponse:
-    """Validate and enqueue a job; returns acceptance message on success."""
+    """Validate and persist a new job; returns acceptance message on success."""
     if payload.job_id != job_id:
+        metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
         raise HTTPException(
             status_code=400,
             detail="job_id in URL must match job_id in request body",
         )
 
-    if payload.job_id in job_store:
-        raise HTTPException(status_code=409, detail=f"Job {job_id!r} already exists")
+    if not payload.tenant_id.strip():
+        metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
+        raise HTTPException(status_code=400, detail="tenant_id must not be blank")
 
-    created_at = _next_created_at()
-    sched_job = SchedulerJob(
-        job_id=payload.job_id,
-        tenant_id=payload.tenant_id,
-        priority=payload.priority,
-        created_at=created_at,
-    )
-    result = scheduler.enqueue(sched_job)
-    metrics.record_enqueue_result(result.status)
-    metrics.observe_queue_depth(scheduler.size())
+    if payload.priority < 0:
+        metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
+        raise HTTPException(status_code=400, detail="priority must be >= 0")
 
-    if not result.is_accepted():
-        # Invalid request from scheduler validation => 400.
-        if "invalid" in result.status.value:
-            raise HTTPException(status_code=400, detail=result.message)
-        # Full queue => backpressure signal.
-        raise HTTPException(status_code=429, detail=result.message)
+    repo = get_repository()
+    try:
+        try:
+            existing = repo.get_job(job_id)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while checking job: {exc}",
+            ) from exc
 
-    record = JobRecord(
-        job_id=payload.job_id,
-        tenant_id=payload.tenant_id,
-        priority=payload.priority,
-        created_at=created_at,
-        state=JobState.QUEUED,
-    )
-    job_store[payload.job_id] = record
+        if existing is not None:
+            raise HTTPException(status_code=409, detail=f"Job {job_id!r} already exists")
 
-    return MessageResponse(message="Job accepted", job_id=record.job_id, state=record.state.value)
+        try:
+            record = repo.create_job(
+                job_id=payload.job_id,
+                tenant_id=payload.tenant_id,
+                priority=payload.priority,
+                state=JobState.QUEUED.value,
+                payload={},
+            )
+        except UniqueViolation:
+            raise HTTPException(status_code=409, detail=f"Job {job_id!r} already exists")
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while creating job: {exc}",
+            ) from exc
+
+        metrics.record_enqueue_result(EnqueueStatus.ACCEPTED)
+        return MessageResponse(
+            message="Job accepted",
+            job_id=record.job_id,
+            state=record.state,
+        )
+    finally:
+        _close_repository(repo)
 
 
 @app.post(
@@ -223,77 +247,113 @@ def enqueue_job(
 )
 def cancel_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse:
     """Cancel an existing job using state-transition rules."""
-    record = job_store.get(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    repo = get_repository()
+    try:
+        try:
+            record = repo.get_job(job_id)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while loading job: {exc}",
+            ) from exc
 
-    if not can_transition(record.state, JobState.CANCELED):
-        raise HTTPException(
-            status_code=409,
-            detail=explain_transition(record.state, JobState.CANCELED),
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+
+        current = _parse_state(record.state)
+        if current in TERMINAL_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail=explain_transition(current, JobState.CANCELED),
+            )
+
+        if not can_transition(current, JobState.CANCELED):
+            raise HTTPException(
+                status_code=409,
+                detail=explain_transition(current, JobState.CANCELED),
+            )
+
+        try:
+            updated = repo.update_job_state(job_id, JobState.CANCELED.value)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while canceling job: {exc}",
+            ) from exc
+
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+
+        return MessageResponse(
+            message="Job canceled",
+            job_id=updated.job_id,
+            state=updated.state,
         )
-
-    record.state = JobState.CANCELED
-    return MessageResponse(message="Job canceled", job_id=record.job_id, state=record.state.value)
+    finally:
+        _close_repository(repo)
 
 
 @app.post(
     "/jobs/{job_id}/retry",
     response_model=MessageResponse,
     summary="Retry a failed job",
-    description="Retry only when job is currently FAILED; re-enqueue when allowed.",
+    description="Move a FAILED job to RETRY_SCHEDULED when allowed by the state machine.",
 )
 def retry_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse:
     """Retry a job if it is in FAILED state; otherwise return a conflict error."""
-    record = job_store.get(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    repo = get_repository()
+    try:
+        try:
+            record = repo.get_job(job_id)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while loading job: {exc}",
+            ) from exc
 
-    if record.state is not JobState.FAILED:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Retry allowed only from FAILED state. Current state: {record.state.value}",
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+
+        current = _parse_state(record.state)
+        if current is not JobState.FAILED:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Retry allowed only from FAILED state. "
+                    f"Current state: {current.value}"
+                ),
+            )
+
+        if not can_transition(current, JobState.RETRY_SCHEDULED):
+            raise HTTPException(
+                status_code=409,
+                detail=explain_transition(current, JobState.RETRY_SCHEDULED),
+            )
+
+        try:
+            updated = repo.update_job_state(job_id, JobState.RETRY_SCHEDULED.value)
+        except PsycopgError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while scheduling retry: {exc}",
+            ) from exc
+
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+
+        return MessageResponse(
+            message="Job retried",
+            job_id=updated.job_id,
+            state=updated.state,
         )
-
-    # FAILED -> RETRY_SCHEDULED -> QUEUED (as in our state machine model).
-    if not can_transition(record.state, JobState.RETRY_SCHEDULED):
-        raise HTTPException(
-            status_code=409,
-            detail=explain_transition(record.state, JobState.RETRY_SCHEDULED),
-        )
-    record.state = JobState.RETRY_SCHEDULED
-
-    retry_job_obj = SchedulerJob(
-        job_id=record.job_id,
-        tenant_id=record.tenant_id,
-        priority=record.priority,
-        created_at=record.created_at,
-    )
-    result = scheduler.enqueue(retry_job_obj)
-    metrics.record_enqueue_result(result.status)
-    metrics.observe_queue_depth(scheduler.size())
-
-    if not result.is_accepted():
-        if "invalid" in result.status.value:
-            raise HTTPException(status_code=400, detail=result.message)
-        raise HTTPException(status_code=429, detail=result.message)
-
-    if not can_transition(record.state, JobState.QUEUED):
-        raise HTTPException(
-            status_code=409,
-            detail=explain_transition(record.state, JobState.QUEUED),
-        )
-    record.state = JobState.QUEUED
-    return MessageResponse(message="Job retried", job_id=record.job_id, state=record.state.value)
+    finally:
+        _close_repository(repo)
 
 
 @app.get(
     "/metrics",
     summary="Get current scheduler metrics",
-    description=(
-        "Return current in-memory scheduler metrics including enqueue outcomes, "
-        "dispatch counters, queue wait-time summaries, and queue depth peak."
-    ),
+    description="Return current in-process scheduler metrics for this API process.",
 )
 def get_metrics() -> dict[str, Any]:
     """Expose metrics snapshot for this control-plane process."""

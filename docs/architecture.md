@@ -131,7 +131,7 @@ The combined pipeline is:
 
 This is more realistic than pure FIFO or pure priority alone. Pure FIFO is simple but ignores urgency and cross-tenant fairness. Pure priority helps urgency but can starve some work. The combined pipeline is a practical middle ground that reflects how production schedulers are usually designed.
 
-This is still an **in-memory control-plane prototype** in Python. It is not yet wired to Kafka dispatch or persistent storage, so treat it as the scheduling model and decision flow, not a complete distributed runtime.
+The **scheduling policies** above are still exercised mainly as **in-memory Python prototypes** for simulation and metrics. The **HTTP job API** now persists rows in Postgres via `JobRepository`; Kafka dispatch and Go workers are the next integration step.
 
 ## PostgreSQL as Durable Job State Store
 
@@ -168,6 +168,27 @@ The repository **hides SQL details** behind a small, testable surface: create, r
 **Postgres remains the durable source of truth** for job state: the repository is how the application reads and writes that truth, not a second copy of business rules.
 
 Queries use **parameterized SQL** (bound parameters, not Python string formatting) so values are never concatenated into query text—a basic safety and correctness practice you should mention in interviews when discussing SQL injection and maintainable data access.
+
+## API to Repository Flow
+
+The control-plane **FastAPI routes** (`control_plane/api.py`) now talk to jobs through **`JobRepository`**, not by embedding SQL in every handler. That is a simple **layered design** you can draw on a whiteboard in an interview.
+
+**Request path (today):**
+
+1. **Client** calls a route such as `POST /jobs/{job_id}/enqueue` or `GET /jobs/{job_id}`.
+2. **FastAPI handler** validates the HTTP request (body shape, URL/body `job_id` match, state-transition rules via `job_state.py`).
+3. **`JobRepository`** runs the database work: `create_job()`, `get_job()`, `update_job_state()`, and similar methods.
+4. **PostgreSQL** stores the result in the **`jobs` table**—the **durable source of truth** for job identity, state, retries, and payload.
+
+**Why separate API from SQL:**
+
+- **API logic** stays focused on HTTP status codes, validation, and orchestration (“what should happen for this request?”).
+- **`JobRepository` owns SQL access** to the `jobs` table—INSERT/SELECT/UPDATE with parameterized queries live in one place.
+- **Postgres** remains the system of record; the repository is how Python reads and writes that record, not a second copy of state in memory.
+
+**Interview sound bite:** *“Routes don’t know table column lists; the repository does. Postgres is truth; the API is the front door.”*
+
+**Not connected yet:** This flow **does not** publish to **Kafka** or assign work to **Go workers**. Enqueue/cancel/retry today update **durable rows** only. Worker consumption, dispatch, and execution metrics will plug in later without rewriting every SQL string in the API.
 
 ## Data Flow
 

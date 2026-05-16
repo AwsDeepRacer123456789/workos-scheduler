@@ -28,7 +28,21 @@ TODO: Generate OpenAPI 3.0 specification with:
 
 ## Control Plane API
 
-KernelQ now includes an in-memory **FastAPI-based control-plane API** (`control_plane/api.py`). It exposes beginner-friendly endpoints for reading job state, enqueueing work, canceling jobs, retrying failed jobs, and reading scheduling metrics while the project is still in prototype mode.
+KernelQ includes a **FastAPI-based control-plane API** (`control_plane/api.py`). It exposes beginner-friendly endpoints for reading job state, enqueueing work, canceling jobs, retrying failed jobs, and reading in-process scheduling metrics while the project is still in prototype mode.
+
+### Postgres-backed Job API
+
+Job API endpoints now **persist job records in PostgreSQL** instead of keeping state only in memory. That gives you durable job rows you can inspect after a restart—important when you explain reliability in interviews.
+
+**What each route does today:**
+
+- **`POST /jobs/{job_id}/enqueue`** — Creates a **durable** job row via `JobRepository.create_job()`. New jobs start in state `queued`. If the `job_id` already exists, the API returns **409 Conflict**.
+- **`GET /jobs/{job_id}`** — Reads the job from Postgres (`get_job()`). Returns fields such as `job_id`, `tenant_id`, `priority`, `state`, `payload`, `retry_count`, `max_retries`, `created_at`, and `updated_at`. Missing jobs return **404**.
+- **`POST /jobs/{job_id}/cancel`** and **`POST /jobs/{job_id}/retry`** — Load the job from Postgres, validate transitions using `job_state.py`, then call `update_job_state()` on the repository layer. State changes are written back to the same `jobs` table.
+
+**Local setup, not cloud yet:** This uses **local Postgres** (for example via `docker compose` and `control_plane/migrations/001_create_jobs.sql`). We have **not** wired cloud RDS or managed databases yet—that is a later deployment step.
+
+**Not connected yet:** The HTTP API does not enqueue into the in-memory scheduler or Kafka from these routes. Scheduling queues and worker dispatch come in a later milestone; for now, focus on **durable state + clear HTTP contracts**.
 
 ### Route Summary
 
@@ -56,8 +70,12 @@ Success response:
   "job_id": "job-123",
   "tenant_id": "tenant-a",
   "priority": 10,
-  "created_at": 3,
-  "state": "queued"
+  "state": "queued",
+  "payload": {},
+  "retry_count": 0,
+  "max_retries": 3,
+  "created_at": 1715000000,
+  "updated_at": 1715000000
 }
 ```
 
@@ -96,11 +114,11 @@ Success response:
 }
 ```
 
-Example rejection (full queue):
+Example rejection (duplicate job):
 
 ```json
 {
-  "detail": "queue is full"
+  "detail": "Job 'job-123' already exists"
 }
 ```
 
@@ -136,7 +154,7 @@ Success response:
 {
   "message": "Job retried",
   "job_id": "job-123",
-  "state": "queued"
+  "state": "retry_scheduled"
 }
 ```
 
@@ -185,12 +203,14 @@ curl -X POST http://127.0.0.1:8000/jobs/job-123/enqueue \
 
 ### Automated API Tests
 
-Alongside manual checks in Postman/`curl`, KernelQ now includes API tests in `control_plane/tests/test_api.py` using FastAPI `TestClient`.
+Alongside manual checks in Postman/`curl`, KernelQ includes API tests in `control_plane/tests/test_api.py` using FastAPI `TestClient`.
 
-These tests cover core outcomes such as:
+These tests require **local Postgres** and the `jobs` migration applied. They use unique job IDs and clean up rows via `JobRepository.delete_job()`.
+
+Core outcomes covered:
 - `200` for successful enqueue/cancel/metrics requests
 - `404` for missing jobs
-- `409` for invalid retry state transitions
+- `409` for duplicate enqueue and invalid retry/cancel transitions
 - `422` for schema validation errors (missing required fields)
 
 ## Health Checks and OpenAPI
