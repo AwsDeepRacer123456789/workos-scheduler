@@ -50,8 +50,43 @@ Job API endpoints now **persist job records in PostgreSQL** instead of keeping s
 - `GET /jobs/{job_id}`: fetch one job's current state and details.
 - `POST /jobs/{job_id}/enqueue`: validate and enqueue a job.
 - `POST /jobs/{job_id}/cancel`: cancel a job (state transition to `canceled` when valid).
-- `POST /jobs/{job_id}/retry`: retry a job if it is currently `failed`.
+- `POST /jobs/{job_id}/retry`: retry a job when the state machine allows `failed` → `retry_scheduled`.
 - `GET /metrics`: return current scheduler metrics snapshot.
+
+### API Model Cleanup and State Transitions
+
+We simplified the HTTP contract so **resource identity lives in the URL**, and **lifecycle rules live in one module** (`control_plane/kernelq/job_state.py`).
+
+**Enqueue: `job_id` in the path only**
+
+- **`POST /jobs/{job_id}/enqueue`** takes the job id from the **URL path** (`job-123` in `/jobs/job-123/enqueue`).
+- The **request body no longer includes `job_id`**. That avoids two sources of truth and catches fewer client bugs (no “URL says A, body says B”).
+- The body carries scheduling fields: `tenant_id`, `priority`, and optional `payload` / `max_retries`.
+- On success, the API returns the **full job row** from Postgres (same shape as `GET /jobs/{job_id}`), starting in state `queued`.
+
+**Example enqueue body (no `job_id`):**
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "priority": 10,
+  "payload": {"kind": "billing-export"}
+}
+```
+
+**Cancel and retry: follow the state machine**
+
+- **`POST /jobs/{job_id}/cancel`** and **`POST /jobs/{job_id}/retry`** load the current state from Postgres, then call **`can_transition()`** from `job_state.py`.
+- Routes do **not** invent ad-hoc rules (for example “retry if queued”). The API delegates to the shared lifecycle map—same rules schedulers and workers will use later.
+- **Cancel** moves to `canceled` only when the transition is legal (for example from `queued` or `running`).
+- **Retry** moves to `retry_scheduled` only from **`failed`** (the only state allowed to enter retry scheduling in the current machine).
+
+**Illegal transitions → 409 Conflict**
+
+- If the requested transition is not allowed, the API returns **409** with a clear `detail` string from `explain_transition()` (for example canceling a job already in `canceled`, or retrying while still `queued`).
+- **404** still means “job id not found”; **409** means “job exists, but this operation is invalid for its current state.”
+
+**Interview sound bite:** *“The URL names the resource; the body carries attributes; `job_state.py` owns transition policy; illegal moves fail with 409, not silent corruption.”*
 
 ### Endpoint Examples
 
@@ -98,19 +133,24 @@ Content-Type: application/json
 
 ```json
 {
-  "job_id": "job-123",
   "tenant_id": "tenant-a",
   "priority": 10
 }
 ```
 
-Success response:
+Success response (persisted job row):
 
 ```json
 {
-  "message": "Job accepted",
   "job_id": "job-123",
-  "state": "queued"
+  "tenant_id": "tenant-a",
+  "priority": 10,
+  "state": "queued",
+  "payload": {},
+  "retry_count": 0,
+  "max_retries": 3,
+  "created_at": 1715000000,
+  "updated_at": 1715000000
 }
 ```
 
@@ -158,11 +198,11 @@ Success response:
 }
 ```
 
-Example rejection (wrong state):
+Example rejection (illegal state transition, HTTP 409):
 
 ```json
 {
-  "detail": "Retry allowed only from FAILED state. Current state: queued"
+  "detail": "Invalid transition: Cannot transition from CANCELED to RETRY_SCHEDULED. Terminal states (SUCCEEDED, DEAD_LETTERED, CANCELED) are final."
 }
 ```
 
@@ -198,7 +238,7 @@ You can test these endpoints with either **Postman** (import requests manually) 
 ```bash
 curl -X POST http://127.0.0.1:8000/jobs/job-123/enqueue \
   -H "Content-Type: application/json" \
-  -d '{"job_id":"job-123","tenant_id":"tenant-a","priority":10}'
+  -d '{"tenant_id":"tenant-a","priority":10}'
 ```
 
 ### Automated API Tests

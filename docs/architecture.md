@@ -176,7 +176,7 @@ The control-plane **FastAPI routes** (`control_plane/api.py`) now talk to jobs t
 **Request path (today):**
 
 1. **Client** calls a route such as `POST /jobs/{job_id}/enqueue` or `GET /jobs/{job_id}`.
-2. **FastAPI handler** validates the HTTP request (body shape, URL/body `job_id` match, state-transition rules via `job_state.py`).
+2. **FastAPI handler** validates the HTTP request (body shape, `job_id` from the URL path, state-transition rules via `job_state.py`).
 3. **`JobRepository`** runs the database work: `create_job()`, `get_job()`, `update_job_state()`, and similar methods.
 4. **PostgreSQL** stores the result in the **`jobs` table**—the **durable source of truth** for job identity, state, retries, and payload.
 
@@ -189,6 +189,22 @@ The control-plane **FastAPI routes** (`control_plane/api.py`) now talk to jobs t
 **Interview sound bite:** *“Routes don’t know table column lists; the repository does. Postgres is truth; the API is the front door.”*
 
 **Not connected yet:** This flow **does not** publish to **Kafka** or assign work to **Go workers**. Enqueue/cancel/retry today update **durable rows** only. Worker consumption, dispatch, and execution metrics will plug in later without rewriting every SQL string in the API.
+
+## State Transition Enforcement in the API
+
+The HTTP API **does not invent its own state rules**. Handlers for cancel and retry do not hard-code one-off `if state == ...` trees that could drift from the rest of the system.
+
+Instead, routes use the **shared job lifecycle state machine** in `control_plane/kernelq/job_state.py`:
+
+- **`JobState`** — all legal states (stored in Postgres as lowercase strings such as `queued`, `failed`, `canceled`)
+- **`can_transition(from, to)`** — whether a move is allowed
+- **`explain_transition(from, to)`** — human-readable reason when a move is rejected
+
+**Why this matters:** The same module can drive **API behavior today**, **scheduler dispatch decisions tomorrow**, and **future worker status updates** without three different definitions of “can this job be retried?” One policy, many callers—easier to test, document, and defend in an interview.
+
+**Conflict, not silent corruption:** If a client requests an illegal transition (for example retry while `queued`, or cancel after `succeeded`), the API returns **409 Conflict** with `detail` from `explain_transition()`. It does **not** write a bad state to Postgres. That fail-fast behavior protects operators and downstream automation from believing a job is in a state the lifecycle never allows.
+
+**Interview sound bite:** *“Postgres stores current state; `job_state.py` defines allowed moves; the API enforces moves before UPDATE—illegal requests get 409, not mystery rows.”*
 
 ## Data Flow
 

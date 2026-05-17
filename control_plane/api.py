@@ -8,7 +8,7 @@ Kafka dispatch are not wired here yet—this module focuses on HTTP + durable st
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Path
 from psycopg import Error as PsycopgError
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from control_plane.kernelq.db import connect
 from control_plane.kernelq.enqueue_result import EnqueueStatus
 from control_plane.kernelq.job_repository import JobRepository
-from control_plane.kernelq.job_state import TERMINAL_STATES, JobState, can_transition, explain_transition
+from control_plane.kernelq.job_state import JobState, can_transition, explain_transition
 from control_plane.kernelq.scheduler_metrics import SchedulerMetrics
 
 
@@ -43,7 +43,12 @@ def _close_repository(repo: JobRepository) -> None:
 
 
 def _parse_state(state_value: str) -> JobState:
-    """Convert a stored state string to JobState, or raise if unknown."""
+    """
+    Convert a database state string to JobState.
+
+    Values in Postgres use lowercase strings (for example ``queued``, ``failed``)
+    matching JobState enum values—not uppercase enum names.
+    """
     try:
         return JobState(state_value)
     except ValueError as exc:
@@ -84,13 +89,20 @@ class EnqueueJobRequest(BaseModel):
     """
     Request body for enqueue.
 
-    We include job_id in the payload even though it is also in the URL so we can
-    validate consistency and keep the API contract explicit.
+    The job id comes from the URL path only. This body carries scheduling fields.
     """
 
-    job_id: str = Field(..., min_length=1, description="Unique job identifier")
     tenant_id: str = Field(..., min_length=1, description="Tenant that owns the job")
-    priority: int = Field(..., description="Larger value means more urgent")
+    priority: int = Field(..., ge=0, description="Larger value means more urgent")
+    payload: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Optional client payload stored as JSON",
+    )
+    max_retries: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Maximum retry attempts before dead-lettering (default 3)",
+    )
 
 
 class JobResponse(BaseModel):
@@ -176,29 +188,21 @@ def get_job(job_id: str = Path(..., description="Job ID")) -> JobResponse:
 
 @app.post(
     "/jobs/{job_id}/enqueue",
-    response_model=MessageResponse,
+    response_model=JobResponse,
     summary="Enqueue a job",
-    description="Validate the request and persist a new job in Postgres with state queued.",
+    description=(
+        "Validate the request and persist a new job in Postgres with state queued. "
+        "The job id is taken from the URL path."
+    ),
 )
 def enqueue_job(
-    payload: EnqueueJobRequest,
-    job_id: str = Path(..., description="Job ID in URL"),
-) -> MessageResponse:
-    """Validate and persist a new job; returns acceptance message on success."""
-    if payload.job_id != job_id:
-        metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
-        raise HTTPException(
-            status_code=400,
-            detail="job_id in URL must match job_id in request body",
-        )
-
-    if not payload.tenant_id.strip():
+    body: EnqueueJobRequest,
+    job_id: str = Path(..., min_length=1, description="Job ID in URL"),
+) -> JobResponse:
+    """Validate and persist a new job; returns the stored row on success."""
+    if not body.tenant_id.strip():
         metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
         raise HTTPException(status_code=400, detail="tenant_id must not be blank")
-
-    if payload.priority < 0:
-        metrics.record_enqueue_result(EnqueueStatus.REJECTED_INVALID)
-        raise HTTPException(status_code=400, detail="priority must be >= 0")
 
     repo = get_repository()
     try:
@@ -213,13 +217,17 @@ def enqueue_job(
         if existing is not None:
             raise HTTPException(status_code=409, detail=f"Job {job_id!r} already exists")
 
+        job_payload = body.payload if body.payload is not None else {}
+        max_retries = body.max_retries if body.max_retries is not None else 3
+
         try:
             record = repo.create_job(
-                job_id=payload.job_id,
-                tenant_id=payload.tenant_id,
-                priority=payload.priority,
+                job_id=job_id,
+                tenant_id=body.tenant_id,
+                priority=body.priority,
                 state=JobState.QUEUED.value,
-                payload={},
+                payload=job_payload,
+                max_retries=max_retries,
             )
         except UniqueViolation:
             raise HTTPException(status_code=409, detail=f"Job {job_id!r} already exists")
@@ -230,11 +238,7 @@ def enqueue_job(
             ) from exc
 
         metrics.record_enqueue_result(EnqueueStatus.ACCEPTED)
-        return MessageResponse(
-            message="Job accepted",
-            job_id=record.job_id,
-            state=record.state,
-        )
+        return _record_to_response(record)
     finally:
         _close_repository(repo)
 
@@ -243,10 +247,10 @@ def enqueue_job(
     "/jobs/{job_id}/cancel",
     response_model=MessageResponse,
     summary="Cancel a job",
-    description="Move a job to CANCELED if the transition is valid.",
+    description="Move a job to canceled if the state machine allows it.",
 )
 def cancel_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse:
-    """Cancel an existing job using state-transition rules."""
+    """Cancel an existing job using can_transition() from job_state."""
     repo = get_repository()
     try:
         try:
@@ -261,20 +265,15 @@ def cancel_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse
             raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
 
         current = _parse_state(record.state)
-        if current in TERMINAL_STATES:
+        target = JobState.CANCELED
+        if not can_transition(current, target):
             raise HTTPException(
                 status_code=409,
-                detail=explain_transition(current, JobState.CANCELED),
-            )
-
-        if not can_transition(current, JobState.CANCELED):
-            raise HTTPException(
-                status_code=409,
-                detail=explain_transition(current, JobState.CANCELED),
+                detail=explain_transition(current, target),
             )
 
         try:
-            updated = repo.update_job_state(job_id, JobState.CANCELED.value)
+            updated = repo.update_job_state(job_id, target.value)
         except PsycopgError as exc:
             raise HTTPException(
                 status_code=500,
@@ -297,10 +296,10 @@ def cancel_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse
     "/jobs/{job_id}/retry",
     response_model=MessageResponse,
     summary="Retry a failed job",
-    description="Move a FAILED job to RETRY_SCHEDULED when allowed by the state machine.",
+    description="Move a failed job to retry_scheduled when the state machine allows it.",
 )
 def retry_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse:
-    """Retry a job if it is in FAILED state; otherwise return a conflict error."""
+    """Retry a job using can_transition(FAILED, RETRY_SCHEDULED) rules only."""
     repo = get_repository()
     try:
         try:
@@ -315,23 +314,15 @@ def retry_job(job_id: str = Path(..., description="Job ID")) -> MessageResponse:
             raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
 
         current = _parse_state(record.state)
-        if current is not JobState.FAILED:
+        target = JobState.RETRY_SCHEDULED
+        if not can_transition(current, target):
             raise HTTPException(
                 status_code=409,
-                detail=(
-                    f"Retry allowed only from FAILED state. "
-                    f"Current state: {current.value}"
-                ),
-            )
-
-        if not can_transition(current, JobState.RETRY_SCHEDULED):
-            raise HTTPException(
-                status_code=409,
-                detail=explain_transition(current, JobState.RETRY_SCHEDULED),
+                detail=explain_transition(current, target),
             )
 
         try:
-            updated = repo.update_job_state(job_id, JobState.RETRY_SCHEDULED.value)
+            updated = repo.update_job_state(job_id, target.value)
         except PsycopgError as exc:
             raise HTTPException(
                 status_code=500,

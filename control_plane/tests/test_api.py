@@ -8,9 +8,8 @@ These tests call the real Postgres-backed API. Before running:
 
        psql "$DATABASE_URL" -f control_plane/migrations/001_create_jobs.sql
 
-   (Or use the connection string from docker-compose; see control_plane/README.md.)
-
-Each test uses a unique ``job_id`` and deletes that row in ``finally`` so runs stay isolated.
+Each test uses a unique ``job_id``. Rows are deleted before and after so runs stay isolated.
+Enqueue request bodies never include ``job_id`` — the id comes from the URL path only.
 """
 
 from __future__ import annotations
@@ -33,6 +32,11 @@ def _unique_job_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _enqueue_body(*, tenant_id: str = "tenant-a", priority: int = 5) -> dict:
+    """Valid enqueue JSON body (job_id is only in the URL)."""
+    return {"tenant_id": tenant_id, "priority": priority}
+
+
 def _delete_job(job_id: str) -> None:
     """Remove a test job row via JobRepository (safe if the job does not exist)."""
     with connect() as conn:
@@ -41,11 +45,7 @@ def _delete_job(job_id: str) -> None:
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_postgres_and_migration() -> None:
-    """
-    Skip the whole module unless Postgres is up and the jobs table exists.
-
-    That means the 001_create_jobs.sql migration has been applied.
-    """
+    """Skip the module unless Postgres is up and the jobs table exists."""
     try:
         with connect() as conn:
             conn.execute("SELECT 1")
@@ -76,6 +76,7 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+# 1) GET /metrics returns 200
 def test_get_metrics_returns_200(client: TestClient) -> None:
     response = client.get("/metrics")
 
@@ -83,6 +84,7 @@ def test_get_metrics_returns_200(client: TestClient) -> None:
     assert "enqueue_accepted_count" in response.json()
 
 
+# 2) GET missing job returns 404
 def test_get_missing_job_returns_404(client: TestClient) -> None:
     job_id = _unique_job_id("missing")
     response = client.get(f"/jobs/{job_id}")
@@ -90,46 +92,34 @@ def test_get_missing_job_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_enqueue_valid_job_returns_200(client: TestClient) -> None:
+# 3) POST enqueue with valid body returns 200
+def test_enqueue_valid_body_returns_200(client: TestClient) -> None:
     job_id = _unique_job_id("enqueue_ok")
     _delete_job(job_id)
 
     try:
         response = client.post(
             f"/jobs/{job_id}/enqueue",
-            json={"job_id": job_id, "priority": 5, "tenant_id": "tenant-a"},
+            json=_enqueue_body(),
         )
 
         assert response.status_code == 200
-        assert response.json()["message"] == "Job accepted"
+        body = response.json()
+        assert body["job_id"] == job_id
+        assert body["state"] == "queued"
+        assert body["tenant_id"] == "tenant-a"
+        assert body["priority"] == 5
     finally:
         _delete_job(job_id)
 
 
-def test_enqueue_duplicate_job_returns_409(client: TestClient) -> None:
-    job_id = _unique_job_id("enqueue_dup")
-    body = {"job_id": job_id, "priority": 1, "tenant_id": "tenant-a"}
-    _delete_job(job_id)
-
-    try:
-        first = client.post(f"/jobs/{job_id}/enqueue", json=body)
-        assert first.status_code == 200
-
-        second = client.post(f"/jobs/{job_id}/enqueue", json=body)
-        assert second.status_code == 409
-    finally:
-        _delete_job(job_id)
-
-
+# 4) GET after enqueue returns persisted job data
 def test_get_job_after_enqueue_returns_persisted_job_data(client: TestClient) -> None:
     job_id = _unique_job_id("get_after_enqueue")
     _delete_job(job_id)
 
     try:
-        client.post(
-            f"/jobs/{job_id}/enqueue",
-            json={"job_id": job_id, "priority": 5, "tenant_id": "tenant-a"},
-        )
+        client.post(f"/jobs/{job_id}/enqueue", json=_enqueue_body())
 
         response = client.get(f"/jobs/{job_id}")
 
@@ -148,15 +138,31 @@ def test_get_job_after_enqueue_returns_persisted_job_data(client: TestClient) ->
         _delete_job(job_id)
 
 
-def test_cancel_existing_job_returns_200_and_canceled_state(client: TestClient) -> None:
-    job_id = _unique_job_id("cancel_ok")
+# 5) duplicate enqueue returns 409
+def test_enqueue_duplicate_job_returns_409(client: TestClient) -> None:
+    job_id = _unique_job_id("enqueue_dup")
+    body = _enqueue_body(priority=1)
     _delete_job(job_id)
 
     try:
-        client.post(
-            f"/jobs/{job_id}/enqueue",
-            json={"job_id": job_id, "priority": 5, "tenant_id": "tenant-a"},
-        )
+        first = client.post(f"/jobs/{job_id}/enqueue", json=body)
+        assert first.status_code == 200
+
+        second = client.post(f"/jobs/{job_id}/enqueue", json=body)
+        assert second.status_code == 409
+    finally:
+        _delete_job(job_id)
+
+
+# 6) POST cancel on QUEUED job returns 200 and state canceled
+def test_cancel_queued_job_returns_200_and_canceled_state(client: TestClient) -> None:
+    job_id = _unique_job_id("cancel_queued")
+    _delete_job(job_id)
+
+    try:
+        enqueue = client.post(f"/jobs/{job_id}/enqueue", json=_enqueue_body())
+        assert enqueue.status_code == 200
+        assert enqueue.json()["state"] == "queued"
 
         response = client.post(f"/jobs/{job_id}/cancel")
 
@@ -166,15 +172,13 @@ def test_cancel_existing_job_returns_200_and_canceled_state(client: TestClient) 
         _delete_job(job_id)
 
 
+# 7) POST retry after cancel returns 409
 def test_retry_after_cancel_returns_409(client: TestClient) -> None:
     job_id = _unique_job_id("retry_after_cancel")
     _delete_job(job_id)
 
     try:
-        client.post(
-            f"/jobs/{job_id}/enqueue",
-            json={"job_id": job_id, "priority": 5, "tenant_id": "tenant-a"},
-        )
+        client.post(f"/jobs/{job_id}/enqueue", json=_enqueue_body())
         client.post(f"/jobs/{job_id}/cancel")
 
         response = client.post(f"/jobs/{job_id}/retry")
@@ -184,23 +188,69 @@ def test_retry_after_cancel_returns_409(client: TestClient) -> None:
         _delete_job(job_id)
 
 
+# 8) POST enqueue missing required fields returns 422
 def test_enqueue_missing_required_fields_returns_422(client: TestClient) -> None:
     response = client.post(
         "/jobs/bad/enqueue",
-        json={"priority": 5, "tenant_id": "tenant-a"},
+        json={"priority": 5},
     )
 
     assert response.status_code == 422
 
 
-def test_enqueue_invalid_blank_tenant_id_returns_non_200(client: TestClient) -> None:
+# 9) POST enqueue blank tenant_id returns non-200
+def test_enqueue_blank_tenant_id_returns_non_200(client: TestClient) -> None:
     job_id = _unique_job_id("blank_tenant")
     _delete_job(job_id)
 
     response = client.post(
         f"/jobs/{job_id}/enqueue",
-        json={"job_id": job_id, "priority": 5, "tenant_id": "   "},
+        json=_enqueue_body(tenant_id="   "),
     )
 
     assert response.status_code != 200
     _delete_job(job_id)
+
+
+# 10) POST enqueue negative priority returns 422 or 400
+def test_enqueue_negative_priority_returns_422_or_400(client: TestClient) -> None:
+    job_id = _unique_job_id("bad_priority")
+    _delete_job(job_id)
+
+    response = client.post(
+        f"/jobs/{job_id}/enqueue",
+        json=_enqueue_body(priority=-1),
+    )
+
+    assert response.status_code in (400, 422)
+    _delete_job(job_id)
+
+
+# 11) retry works only from FAILED -> RETRY_SCHEDULED
+def test_retry_from_failed_returns_200_and_retry_scheduled_state(
+    client: TestClient,
+) -> None:
+    job_id = _unique_job_id("retry_failed")
+    _delete_job(job_id)
+
+    try:
+        with connect() as conn:
+            repo = JobRepository(conn)
+            repo.create_job(
+                job_id,
+                tenant_id="tenant-a",
+                priority=5,
+                state="failed",
+                payload={},
+            )
+
+        response = client.post(f"/jobs/{job_id}/retry")
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "retry_scheduled"
+
+        loaded = client.get(f"/jobs/{job_id}")
+        assert loaded.status_code == 200
+        assert loaded.json()["state"] == "retry_scheduled"
+    finally:
+        _delete_job(job_id)

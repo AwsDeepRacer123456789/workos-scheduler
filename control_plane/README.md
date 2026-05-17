@@ -152,6 +152,12 @@ The API includes endpoints to **enqueue jobs**, **query job states**, **cancel j
 
 It is designed so external clients and internal services can interact with the KernelQ scheduler through a clear HTTP interface.
 
+## API Model Cleanup and State Safety
+
+- **Enqueue** takes `job_id` from the **URL path** (`POST /jobs/{job_id}/enqueue`), not from the JSON body. The body carries fields like `tenant_id` and `priority` only.
+- **Cancel** and **retry** call the shared state machine in `kernelq/job_state.py` (`can_transition`) before updating Postgres. Illegal moves return **409 Conflict**, not a silent bad state.
+- One lifecycle definition for the API (and later the scheduler and workers) keeps state changes **predictable** as the system grows.
+
 ## Health Check and OpenAPI
 
 The control plane exposes **`GET /health`** so load balancers and people can confirm the API process is up. For now it is a **shallow** check only (it does not probe dependencies).
