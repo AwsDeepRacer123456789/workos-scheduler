@@ -169,6 +169,34 @@ The repository **hides SQL details** behind a small, testable surface: create, r
 
 Queries use **parameterized SQL** (bound parameters, not Python string formatting) so values are never concatenated into query text—a basic safety and correctness practice you should mention in interviews when discussing SQL injection and maintainable data access.
 
+## Database-backed Scheduling Query Path
+
+KernelQ’s **in-memory schedulers** (FIFO, priority, composed) are great for learning and simulation, but they disappear when the process restarts. The control plane now has **repository methods** that ask **Postgres** which jobs are ready to run next— the first concrete step from “policy in Python memory” to **durable, database-backed orchestration**.
+
+**What “schedulable” means (for now):** a job row whose **`state` is `queued`**. That is the waiting line the dispatcher is allowed to drain. Jobs in other states—`created` (not queued yet), `dispatched` (already handed off), `running`, terminal states, or `retry_scheduled` (waiting for backoff)—are **not** returned by the schedulable query.
+
+**How the next jobs are ordered:** the repository selects schedulable rows with:
+
+```sql
+WHERE state = 'queued'
+ORDER BY priority DESC, created_at ASC
+LIMIT <n>
+```
+
+- **`priority DESC`** — more urgent work first (larger priority number runs sooner).
+- **`created_at ASC`** — when priorities tie, **older jobs first** (FIFO among equals), so ordering stays predictable and fair.
+
+**Methods on `JobRepository` (today):**
+
+- **`list_schedulable_jobs(limit=10)`** — runs the query above and returns a list of `JobRecord` objects. A future dispatch loop will call this to decide **what to pick next**.
+- **`mark_job_dispatched(job_id)`** — after a job is selected, moves it from **`queued` → `dispatched`** (only if it is still `queued`). That **claims** the row so another scheduler pass does not pick the same job again, and it matches the lifecycle: *waiting in Postgres* → *handed off toward workers* → *running*.
+
+**Why mark `dispatched`?** Without that step, a job could stay `queued` in the database while already being sent downstream—risking **double dispatch** and making operations unclear (“is it waiting or in flight?”). `dispatched` is the bridge state before Kafka and Go workers are fully wired in.
+
+**What is not connected yet:** this path **does not publish to Kafka**. It answers “which rows should run next?” and “mark this one as handed off” in Postgres only. **Kafka dispatch**—publish runnable jobs, consumer groups, worker pickup—is the **next** milestone. The in-memory prototypes taught **policy**; the repository query path teaches **durability and safe handoff**.
+
+**Interview sound bite:** *“Schedulable means `queued` in Postgres, ordered by priority then age; `mark_job_dispatched` claims the row. In-memory schedulers taught ordering rules; the repository makes those rules survive restarts—Kafka comes later.”*
+
 ## API to Repository Flow
 
 The control-plane **FastAPI routes** (`control_plane/api.py`) now talk to jobs through **`JobRepository`**, not by embedding SQL in every handler. That is a simple **layered design** you can draw on a whiteboard in an interview.

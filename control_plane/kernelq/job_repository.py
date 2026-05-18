@@ -15,6 +15,8 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from control_plane.kernelq.job_state import JobState
+
 
 @dataclass
 class JobRecord:
@@ -146,3 +148,70 @@ class JobRepository:
 
         self._conn.commit()
         return deleted
+
+    def list_schedulable_jobs(self, limit: int = 10) -> list[JobRecord]:
+        """
+        Return jobs ready for the scheduler to pick next.
+
+        This is the first database-backed scheduling path: instead of an
+        in-memory queue, the control plane asks Postgres which rows are waiting
+        in ``queued`` state and orders them by policy (urgent first, then FIFO
+        among equals). A future dispatch loop will call this, publish to Kafka,
+        then mark winners as ``dispatched``.
+        """
+        sql = """
+            SELECT
+                job_id, tenant_id, priority, state, payload,
+                retry_count, max_retries, created_at, updated_at
+            FROM jobs
+            WHERE state = %(queued_state)s
+            ORDER BY priority DESC, created_at ASC
+            LIMIT %(limit)s
+        """
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                sql,
+                {"queued_state": JobState.QUEUED.value, "limit": limit},
+            )
+            rows = cur.fetchall()
+
+        self._conn.commit()
+        return [_row_to_record(row) for row in rows]
+
+    def mark_job_dispatched(self, job_id: str) -> JobRecord | None:
+        """
+        Move one job from ``queued`` to ``dispatched`` after it is selected.
+
+        Fetching first makes the rule obvious: only jobs still waiting in the
+        queue may be handed off. The UPDATE also checks ``state = queued`` so
+        two schedulers cannot dispatch the same row if they race.
+        """
+        current = self.get_job(job_id)
+        if current is None or current.state != JobState.QUEUED.value:
+            return None
+
+        sql = """
+            UPDATE jobs
+            SET state = %(new_state)s, updated_at = NOW()
+            WHERE job_id = %(job_id)s AND state = %(queued_state)s
+            RETURNING
+                job_id, tenant_id, priority, state, payload,
+                retry_count, max_retries, created_at, updated_at
+        """
+        params = {
+            "job_id": job_id,
+            "new_state": JobState.DISPATCHED.value,
+            "queued_state": JobState.QUEUED.value,
+        }
+
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+
+        if row is None:
+            self._conn.rollback()
+            return None
+
+        self._conn.commit()
+        return _row_to_record(row)

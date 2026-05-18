@@ -10,6 +10,7 @@ Each test uses a unique ``job_id`` and deletes it in ``finally`` so runs stay is
 
 from __future__ import annotations
 
+import time
 import uuid
 
 import pytest
@@ -17,10 +18,26 @@ from psycopg import OperationalError
 
 from control_plane.kernelq.db import connect
 from control_plane.kernelq.job_repository import JobRepository
+from control_plane.kernelq.job_state import JobState
 
 
 def _unique_job_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def _job_id(prefix: str, suffix: str) -> str:
+    """Build a unique job id under one test prefix (easy cleanup and filtering)."""
+    return f"{prefix}_{suffix}"
+
+
+def _our_jobs(results: list, prefix: str) -> list:
+    """Rows from this test only (shared Postgres may contain other jobs)."""
+    return [job for job in results if job.job_id.startswith(prefix)]
+
+
+def _delete_jobs(repo: JobRepository, *job_ids: str) -> None:
+    for job_id in job_ids:
+        repo.delete_job(job_id)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -115,3 +132,142 @@ def test_delete_job_removes_job() -> None:
             assert repo.delete_job(job_id) is False
         finally:
             repo.delete_job(job_id)
+
+
+def test_list_schedulable_jobs_returns_only_queued() -> None:
+    prefix = _unique_job_id("test_jr_sched_queued_only")
+    queued_id = _job_id(prefix, "queued")
+    created_id = _job_id(prefix, "created")
+    dispatched_id = _job_id(prefix, "dispatched")
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, queued_id, created_id, dispatched_id)
+        try:
+            repo.create_job(queued_id, "tenant-a", 5, JobState.QUEUED.value)
+            repo.create_job(created_id, "tenant-a", 5, JobState.CREATED.value)
+            repo.create_job(dispatched_id, "tenant-a", 5, JobState.DISPATCHED.value)
+
+            ours = _our_jobs(repo.list_schedulable_jobs(limit=500), prefix)
+
+            assert len(ours) == 1
+            assert ours[0].job_id == queued_id
+            assert ours[0].state == JobState.QUEUED.value
+        finally:
+            _delete_jobs(repo, queued_id, created_id, dispatched_id)
+
+
+def test_list_schedulable_jobs_orders_by_priority_desc() -> None:
+    prefix = _unique_job_id("test_jr_sched_priority")
+    low_id = _job_id(prefix, "low")
+    mid_id = _job_id(prefix, "mid")
+    high_id = _job_id(prefix, "high")
+    # High values so these rows sort ahead of unrelated queued jobs in shared Postgres.
+    base_priority = 2_000_000
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, low_id, mid_id, high_id)
+        try:
+            repo.create_job(low_id, "tenant-a", base_priority + 1, JobState.QUEUED.value)
+            repo.create_job(mid_id, "tenant-a", base_priority + 5, JobState.QUEUED.value)
+            repo.create_job(high_id, "tenant-a", base_priority + 10, JobState.QUEUED.value)
+
+            ours = _our_jobs(repo.list_schedulable_jobs(limit=10), prefix)
+
+            assert [job.job_id for job in ours] == [high_id, mid_id, low_id]
+            assert [job.priority for job in ours] == [
+                base_priority + 10,
+                base_priority + 5,
+                base_priority + 1,
+            ]
+        finally:
+            _delete_jobs(repo, low_id, mid_id, high_id)
+
+
+def test_list_schedulable_jobs_breaks_priority_ties_by_created_at_asc() -> None:
+    prefix = _unique_job_id("test_jr_sched_tie")
+    older_id = _job_id(prefix, "older")
+    newer_id = _job_id(prefix, "newer")
+    priority = 2_000_000
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, older_id, newer_id)
+        try:
+            repo.create_job(older_id, "tenant-a", priority, JobState.QUEUED.value)
+            time.sleep(0.02)
+            repo.create_job(newer_id, "tenant-a", priority, JobState.QUEUED.value)
+
+            ours = _our_jobs(repo.list_schedulable_jobs(limit=10), prefix)
+
+            assert len(ours) == 2
+            assert ours[0].job_id == older_id
+            assert ours[1].job_id == newer_id
+            assert ours[0].created_at <= ours[1].created_at
+        finally:
+            _delete_jobs(repo, older_id, newer_id)
+
+
+def test_list_schedulable_jobs_respects_limit() -> None:
+    prefix = _unique_job_id("test_jr_sched_limit")
+    first_id = _job_id(prefix, "first")
+    second_id = _job_id(prefix, "second")
+    third_id = _job_id(prefix, "third")
+    base_priority = 3_000_000
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, first_id, second_id, third_id)
+        try:
+            repo.create_job(first_id, "tenant-a", base_priority + 1, JobState.QUEUED.value)
+            repo.create_job(second_id, "tenant-a", base_priority + 2, JobState.QUEUED.value)
+            repo.create_job(third_id, "tenant-a", base_priority + 3, JobState.QUEUED.value)
+
+            results = repo.list_schedulable_jobs(limit=2)
+
+            assert len(results) == 2
+            ours = _our_jobs(results, prefix)
+            assert [job.job_id for job in ours] == [third_id, second_id]
+        finally:
+            _delete_jobs(repo, first_id, second_id, third_id)
+
+
+def test_mark_job_dispatched_queued_becomes_dispatched() -> None:
+    job_id = _unique_job_id("test_jr_dispatch_ok")
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, job_id)
+        try:
+            repo.create_job(job_id, "tenant-a", 3, JobState.QUEUED.value)
+
+            updated = repo.mark_job_dispatched(job_id)
+
+            assert updated is not None
+            assert updated.state == JobState.DISPATCHED.value
+
+            loaded = repo.get_job(job_id)
+            assert loaded is not None
+            assert loaded.state == JobState.DISPATCHED.value
+        finally:
+            _delete_jobs(repo, job_id)
+
+
+def test_mark_job_dispatched_missing_returns_none() -> None:
+    missing_id = _unique_job_id("test_jr_dispatch_missing")
+    with connect() as conn:
+        repo = JobRepository(conn)
+        assert repo.mark_job_dispatched(missing_id) is None
+
+
+def test_mark_job_dispatched_non_queued_returns_none() -> None:
+    job_id = _unique_job_id("test_jr_dispatch_not_queued")
+    with connect() as conn:
+        repo = JobRepository(conn)
+        _delete_jobs(repo, job_id)
+        try:
+            repo.create_job(job_id, "tenant-a", 1, JobState.RUNNING.value)
+
+            assert repo.mark_job_dispatched(job_id) is None
+
+            loaded = repo.get_job(job_id)
+            assert loaded is not None
+            assert loaded.state == JobState.RUNNING.value
+        finally:
+            _delete_jobs(repo, job_id)

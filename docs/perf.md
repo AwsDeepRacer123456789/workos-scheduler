@@ -51,6 +51,45 @@ We track wait time in three views:
 | `dispatch_count_by_tenant` | Number of dispatched jobs per tenant | Useful alongside wait-time-by-tenant to understand share vs delay |
 | `dispatch_count_by_priority` | Number of dispatched jobs per priority | Useful alongside wait-time-by-priority to understand urgency handling |
 
+## Postgres Scheduling Query Metrics
+
+KernelQ’s **first database-backed scheduling path** lives in the repository layer (`list_schedulable_jobs`, `mark_job_dispatched`). Instead of asking an in-memory queue “who is next?”, the control plane will ask **Postgres** which rows are ready and in what order. We have **not** wired production metrics or load tests for this path yet; this section names what we plan to measure so we can compare policy in simulation with **real query behavior** later.
+
+**The schedulable query (today):**
+
+- **Filter:** `state = 'queued'` (stored lowercase in the `jobs` table). Only jobs waiting to be picked appear; rows already `dispatched`, `running`, or in terminal states are excluded.
+- **Order:** `priority DESC`, then `created_at ASC` — urgent work first; among equal priority, **older jobs first** (FIFO tie-break).
+
+That matches the in-memory priority scheduler’s intent, but the ordering is enforced in SQL so it survives restarts and can be shared across control-plane instances.
+
+**Future metrics (not measured yet):**
+
+| Metric | What it means | Why it matters |
+|--------|---------------|----------------|
+| `schedulable_query_latency` | Time for `list_schedulable_jobs` to return (p50 / p95 / p99) | Slow picks delay every dispatch tick; indexes and query shape must stay healthy as the table grows |
+| `schedulable_query_rows_scanned` | How many rows Postgres examined to satisfy the query (from `EXPLAIN` / stats) | High scans with few results suggest a missing or mismatched index |
+| `jobs_selected_per_scheduler_tick` | Count of jobs returned per call to `list_schedulable_jobs` (often tied to `LIMIT`) | Shows how much work each tick tries to hand off; useful for tuning batch size |
+| `dispatch_transition_latency` | Time from “row selected” to `mark_job_dispatched` completing (queued → dispatched) | Captures claim/update cost and contention if multiple schedulers run |
+
+**Placeholder: `EXPLAIN ANALYZE` output**
+
+When we run the schedulable query against a realistic `jobs` table, paste the plan here (no fabricated numbers):
+
+```
+-- Example (run against local or staging Postgres when ready):
+-- EXPLAIN (ANALYZE, BUFFERS)
+-- SELECT job_id, tenant_id, priority, state, payload,
+--        retry_count, max_retries, created_at, updated_at
+-- FROM jobs
+-- WHERE state = 'queued'
+-- ORDER BY priority DESC, created_at ASC
+-- LIMIT 10;
+
+-- TODO: paste actual EXPLAIN ANALYZE output after first benchmark run.
+```
+
+Until that run exists, treat this section as a **metrics plan**, not a report. Simulation counters above still describe in-memory prototypes; this table is the bridge toward **durable scheduling** observability once Kafka dispatch and a live dispatch loop are added.
+
 ## Load Testing Methodology
 
 TODO: Define test scenarios, load profiles, ramp-up strategies, and success criteria.
